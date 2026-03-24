@@ -1,0 +1,23 @@
+[Unit]
+Description=Project13 — BTC Prediction Market Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Project13
+ExecStart=/root/Project13/.venv/bin/python main.py
+EnvironmentFile=-/root/Project13/.env
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=project13
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
