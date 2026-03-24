@@ -1,6 +1,13 @@
 """Central configuration for Project13."""
 
 import os
+from dotenv import load_dotenv
+
+# Load .env BEFORE any os.getenv() calls below.
+# config.py is evaluated at import time — if load_dotenv() runs later
+# (e.g. in main.py:run()), the env vars won't exist yet and defaults
+# will be baked in permanently.
+load_dotenv()
 
 # --- WebSocket URLs ---
 BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
