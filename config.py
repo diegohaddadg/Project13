@@ -10,7 +10,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- WebSocket URLs ---
-BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+# Binance WebSocket URL — configurable via .env for VPS compatibility:
+#   Global:     wss://stream.binance.com:9443/ws/btcusdt@trade (may be blocked on US IPs)
+#   Binance.US: wss://stream.binance.us:9443/ws/btcusdt@trade
+#   Data mirror: wss://data-stream.binance.vision/ws/btcusdt@trade (public, no geo-block)
+BINANCE_WS_URL = os.getenv("BINANCE_WS_URL", "wss://stream.binance.com:9443/ws/btcusdt@trade")
 COINBASE_WS_URL = "wss://ws-feed.exchange.coinbase.com"
 
 # --- Reconnect ---

@@ -93,6 +93,8 @@ class StateAdapter:
                 "price": b.price if b else None,
                 "latency_ms": b.age_ms() if b else None,
                 "tick_rate": self._agg.binance_feed.tick_rate if self._agg.binance_feed else 0,
+                "last_error": self._agg.binance_feed.last_error if self._agg.binance_feed else "",
+                "reconnect_count": self._agg.binance_feed.reconnect_count if self._agg.binance_feed else 0,
             },
             "coinbase": {
                 "ok": c is not None and not c.is_stale,
