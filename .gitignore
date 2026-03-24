@@ -1,0 +1,21 @@
+# env
+.env
+.venv/
+venv/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# logs / runtime data
+logs/
+data/
+replay/
+
+# macOS
+.DS_Store
+
+# editor
+.cursor/
+.vscode/

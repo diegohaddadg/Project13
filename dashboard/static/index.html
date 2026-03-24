@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project13 Dashboard</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <span class="logo">Project13</span>
+    <span id="mode-badge" class="badge badge-paper">PAPER</span>
+    <span id="ks-badge" class="badge badge-ok">Trading allowed</span>
+    <span id="health-badge" class="badge badge-ok">HEALTHY</span>
+    <span id="conn-status" class="conn-status disconnected">disconnected</span>
+  </div>
+  <div class="header-right">
+    <span id="uptime" class="uptime">--</span>
+    <button id="kill-btn" class="kill-btn" onclick="activateKillSwitch()">ACTIVATE KILL SWITCH</button>
+  </div>
+</div>
+
+<!-- Grid -->
+<div class="grid">
+
+  <!-- Panel 1: Price Feed -->
+  <div class="card">
+    <div class="card-header">Price Feed</div>
+    <div class="card-body">
+      <div id="big-price" class="big-price">--</div>
+      <div id="source-info" class="source-badge">--</div>
+      <div class="sparkline-container"><canvas id="sparkline"></canvas></div>
+      <div class="metric-row"><span class="metric-label">Latency</span><span id="latency" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Volatility</span><span id="volatility" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Binance USDT</span><span id="binance-status" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Coinbase USD</span><span id="coinbase-status" class="metric-value">--</span></div>
+    </div>
+  </div>
+
+  <!-- Panel 2: Markets -->
+  <div class="card">
+    <div class="card-header">Polymarket Markets</div>
+    <div class="card-body">
+      <div id="market-5m">
+        <div style="color:var(--accent);font-weight:600;margin-bottom:4px">BTC 5-MIN</div>
+        <div id="market-5m-content" style="color:var(--text2)">Searching...</div>
+      </div>
+      <hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
+      <div id="market-15m">
+        <div style="color:var(--accent);font-weight:600;margin-bottom:4px">BTC 15-MIN</div>
+        <div id="market-15m-content" style="color:var(--text2)">Searching...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Panel 3: Signals -->
+  <div class="card">
+    <div class="card-header">Signal Engine</div>
+    <div class="card-body">
+      <div id="signal-current" style="margin-bottom:8px;color:var(--text2)">No active signals</div>
+      <div style="max-height:220px;overflow-y:auto">
+        <table>
+          <thead><tr><th>Time</th><th>Mkt</th><th>Strat</th><th>Dir</th><th>Edge</th><th>Conf</th></tr></thead>
+          <tbody id="signal-table"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Panel 4: Execution -->
+  <div class="card">
+    <div class="card-header">Execution & Positions</div>
+    <div class="card-body">
+      <div class="metric-row"><span class="metric-label">Paper baseline</span><span id="starting-capital" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Total Equity</span><span id="total-equity" class="metric-value accent">--</span></div>
+      <div class="metric-row"><span class="metric-label">Free Capital</span><span id="capital" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Deployed (open)</span><span id="deployed-capital" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Realized PnL</span><span id="realized-pnl" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Open Positions</span><span id="open-count" class="metric-value">0</span></div>
+      <div class="metric-row"><span class="metric-label">Rejected</span><span id="rejected-count" class="metric-value">0</span></div>
+      <div id="rejection-detail" style="margin-bottom:4px"></div>
+      <div style="font-size:10px;color:var(--accent);margin-top:6px;font-weight:600">Open Positions</div>
+      <div style="max-height:80px;overflow-y:auto">
+        <table>
+          <thead><tr><th>Mkt</th><th>Dir</th><th>Entry</th><th>Shares</th><th>Hold</th></tr></thead>
+          <tbody id="positions-table"></tbody>
+        </table>
+      </div>
+      <div style="font-size:10px;color:var(--accent);margin-top:6px;font-weight:600">Recent Fills</div>
+      <div style="max-height:80px;overflow-y:auto">
+        <table>
+          <thead><tr><th>Time</th><th>Mkt</th><th>Dir</th><th>Size</th><th>PnL</th></tr></thead>
+          <tbody id="fills-table"></tbody>
+        </table>
+      </div>
+      <div style="font-size:10px;color:var(--accent);margin-top:6px;font-weight:600">Resolved</div>
+      <div style="max-height:80px;overflow-y:auto">
+        <table>
+          <thead><tr><th>Mkt</th><th>Dir</th><th>Entry</th><th>PnL</th></tr></thead>
+          <tbody id="closed-table"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Panel 5: Performance -->
+  <div class="card">
+    <div class="card-header">Performance</div>
+    <div class="card-body">
+      <div class="metric-row"><span class="metric-label">Total PnL</span><span id="total-pnl" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Trades</span><span id="total-trades" class="metric-value">0</span></div>
+      <div class="metric-row"><span class="metric-label">Win Rate</span><span id="win-rate" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Profit Factor</span><span id="profit-factor" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Best Trade</span><span id="best-trade" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Worst Trade</span><span id="worst-trade" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Sharpe</span><span id="sharpe" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Max DD</span><span id="max-dd" class="metric-value">--</span></div>
+      <div id="strategy-breakdown" style="margin-top:8px"></div>
+    </div>
+  </div>
+
+  <!-- Panel 6: Risk & Health -->
+  <div class="card">
+    <div class="card-header">Risk & Health</div>
+    <div class="card-body">
+      <div class="subsection-title">Trading status</div>
+      <div id="trading-status-banner" class="status-banner status-ok">—</div>
+      <ul id="trading-blockers" class="blockers-list"></ul>
+      <p id="per-signal-note" class="text-muted small-note"></p>
+
+      <div class="subsection-title">Risk limits</div>
+      <div class="metric-row"><span class="metric-label">Daily PnL (today)</span><span id="risk-daily-pnl" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Room to daily loss halt</span><span id="risk-daily-room" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Drawdown vs max</span><span id="risk-dd-text" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Exposure vs max</span><span id="risk-exp-text" class="metric-value">--</span></div>
+      <div class="metric-row"><span class="metric-label">Loss streak</span><span id="consec-losses" class="metric-value">0 / 3</span></div>
+      <div class="metric-row"><span class="metric-label">Cooldown</span><span id="risk-cooldown" class="metric-value">—</span></div>
+      <div class="metric-row"><span class="metric-label">Risk rejections (session)</span><span id="risk-rej" class="metric-value">0</span></div>
+      <p id="risk-rej-hint" class="text-muted small-note">Count of risk-layer rejects; execution rejections are in Execution panel.</p>
+
+      <div class="subsection-title">Feed health</div>
+      <div id="health-list"></div>
+      <div id="warnings-list" style="margin-top:6px"></div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
