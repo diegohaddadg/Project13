@@ -139,8 +139,8 @@ VOLATILITY_CIRCUIT_BREAKER = 100.0  # price std above this pauses trading
 MAX_ACCEPTABLE_LATENCY_MS = 500
 
 # Price source reconciliation
-PRICE_SOURCE_DIVERGENCE_WARN_USD = 25  # warn if Binance and Coinbase differ by more
-PRICE_SOURCE_DIVERGENCE_FAIL_USD = 100  # block signals if gap exceeds this
+PRICE_SOURCE_DIVERGENCE_WARN_USD = 50   # warn if USDT/USD basis exceeds this (normal: $15-50)
+PRICE_SOURCE_DIVERGENCE_FAIL_USD = 100  # block signals if gap exceeds this (indicates feed error)
 MARKET_DATA_STALE_WARN_SECONDS = 10     # warn if Polymarket data older than this
 
 # Fees / edge / EV

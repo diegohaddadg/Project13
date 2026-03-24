@@ -80,6 +80,7 @@ class StateAdapter:
         model_spot = self._agg.get_model_spot_price()
         gap = self._agg.get_price_source_gap()
         model_source = "Coinbase USD" if (c and not c.is_stale) else "Binance USDT"
+        gap_detail = self._agg.get_price_gap_detail()
 
         return {
             "price": tick.price if tick else None,
@@ -88,6 +89,7 @@ class StateAdapter:
             "model_spot": model_spot,
             "model_source": model_source,
             "price_source_gap": gap,
+            "price_gap_detail": gap_detail,
             "binance": {
                 "ok": b is not None and not b.is_stale,
                 "price": b.price if b else None,

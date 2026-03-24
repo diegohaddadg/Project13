@@ -94,10 +94,12 @@ class HealthMonitor:
             warnings.append(f"High latency: {status['feed_latency_ms']:.0f}ms")
         if not status["volatility_available"]:
             warnings.append("Volatility data not yet available")
-        # Price source divergence check
+        # Price source divergence check (USDT vs USD basis — $15-50 is normal)
         gap = self._agg.get_price_source_gap()
-        if gap is not None and gap > config.PRICE_SOURCE_DIVERGENCE_WARN_USD:
-            warnings.append(f"BTC price source gap: ${gap:.0f} (USDT vs USD)")
+        if gap is not None and gap > config.PRICE_SOURCE_DIVERGENCE_FAIL_USD:
+            warnings.append(f"BTC price source gap CRITICAL: ${gap:.0f} — possible feed error")
+        elif gap is not None and gap > config.PRICE_SOURCE_DIVERGENCE_WARN_USD:
+            warnings.append(f"BTC USDT/USD basis elevated: ${gap:.0f} (normal: $15-50)")
         return warnings
 
     def _check_feed(self, tick, label: str) -> bool:

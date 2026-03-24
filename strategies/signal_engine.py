@@ -94,9 +94,9 @@ class SignalEngine:
             if gap is not None:
                 diag["price_source_gap"] = gap
                 if gap > config.PRICE_SOURCE_DIVERGENCE_WARN_USD:
-                    diag["reasons"].insert(0, f"price source gap ${gap:.0f} > warn ${config.PRICE_SOURCE_DIVERGENCE_WARN_USD}")
+                    diag["reasons"].insert(0, f"USDT/USD basis ${gap:.0f} elevated (warn>{config.PRICE_SOURCE_DIVERGENCE_WARN_USD})")
             if gap_blocked:
-                diag["reasons"].insert(0, f"BLOCKED: price source gap ${gap:.0f} > fail ${config.PRICE_SOURCE_DIVERGENCE_FAIL_USD}")
+                diag["reasons"].insert(0, f"BLOCKED: price gap ${gap:.0f} > ${config.PRICE_SOURCE_DIVERGENCE_FAIL_USD} — possible feed error")
 
             # Check Polymarket data staleness
             mkt_age = time.time() - state.timestamp

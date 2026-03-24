@@ -217,12 +217,38 @@ class Aggregator:
         return None
 
     def get_price_source_gap(self) -> Optional[float]:
-        """Return absolute USD gap between Binance and Coinbase prices."""
+        """Return absolute USD gap between Binance USDT and Coinbase USD.
+
+        This is primarily the USDT/USD basis (typically $15-50), NOT an error.
+        The gap is only computed when both feeds are fresh (not stale).
+        """
         b = self.latest_binance_tick
         c = self.latest_coinbase_tick
         if b and c and not b.is_stale and not c.is_stale:
             return abs(b.price - c.price)
         return None
+
+    def get_price_gap_detail(self) -> Optional[dict]:
+        """Detailed gap comparison with freshness context."""
+        b = self.latest_binance_tick
+        c = self.latest_coinbase_tick
+        if not b or not c:
+            return None
+        now = time.time()
+        b_age = (now - b.local_timestamp) * 1000
+        c_age = (now - c.local_timestamp) * 1000
+        return {
+            "binance_price": b.price,
+            "coinbase_price": c.price,
+            "gap_usd": abs(b.price - c.price),
+            "gap_direction": "binance_higher" if b.price > c.price else "coinbase_higher",
+            "binance_age_ms": b_age,
+            "coinbase_age_ms": c_age,
+            "binance_stale": b.is_stale,
+            "coinbase_stale": c.is_stale,
+            "freshness_diff_ms": abs(b_age - c_age),
+            "is_basis": True,  # USDT vs USD — expected divergence
+        }
 
     def get_momentum(self) -> dict:
         """Compute short-horizon momentum from model spot price history.
