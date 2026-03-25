@@ -45,31 +45,6 @@ class ExposureTracker:
     def get_available_capital(self) -> float:
         return self._pm.get_available_capital()
 
-    def get_diagnostics(self, proposed_size: float = 0, market_id: str | None = None) -> dict:
-        """Return compact exposure diagnostics (observability only — no side effects)."""
-        equity = self._pm.get_total_equity()
-        total_exp = self.get_total_exposure()
-        total_limit = equity * config.MAX_TOTAL_EXPOSURE_PCT
-        market_exp = self.get_exposure_by_market(market_id) if market_id else 0
-        market_limit = equity * config.MAX_SINGLE_MARKET_EXPOSURE_PCT
-
-        new_total = total_exp + proposed_size
-        new_market = market_exp + proposed_size
-
-        return {
-            "total_exposure_usd": round(total_exp, 2),
-            "total_exposure_pct": round(total_exp / equity, 4) if equity > 0 else 0,
-            "total_limit_usd": round(total_limit, 2),
-            "total_after_usd": round(new_total, 2),
-            "total_after_pct": round(new_total / equity, 4) if equity > 0 else 0,
-            "total_would_breach": new_total > total_limit,
-            "market_exposure_usd": round(market_exp, 2),
-            "market_limit_usd": round(market_limit, 2),
-            "market_after_usd": round(new_market, 2),
-            "market_would_breach": new_market > market_limit if market_id else False,
-            "equity_base": round(equity, 2),
-        }
-
     def would_exceed_limits(
         self, new_order_size: float, market_id: str | None = None
     ) -> bool:
