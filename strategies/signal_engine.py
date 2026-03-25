@@ -28,6 +28,7 @@ from typing import Optional
 from models.trade_signal import TradeSignal
 from models.market_state import MarketState
 from strategies import latency_arb, sniper, market_maker
+from strategies import latency_arb_v2
 from utils.logger import get_logger
 import config
 
@@ -112,12 +113,14 @@ class SignalEngine:
                 continue  # Don't signal on divergent price sources
 
             momentum = signal_input.get("momentum")
+            open_positions = signal_input.get("open_positions")
             market_signals = self._evaluate_market(
                 spot_price=spot_price,
                 volatility=volatility,
                 state=state,
                 price_source_gap=gap,
                 momentum=momentum,
+                open_positions=open_positions,
             )
             all_signals.extend(market_signals)
 
@@ -155,6 +158,7 @@ class SignalEngine:
         state: MarketState,
         price_source_gap: Optional[float] = None,
         momentum: Optional[dict] = None,
+        open_positions: Optional[list[dict]] = None,
     ) -> list[TradeSignal]:
         """Run all enabled strategies for a single market."""
         signals = []
@@ -175,6 +179,13 @@ class SignalEngine:
 
         if "latency_arb" in config.ENABLED_STRATEGIES:
             sig = latency_arb.evaluate(**kwargs)
+            if sig and config.LATENCY_ARB_V2_ENABLED:
+                v2_result = latency_arb_v2.refine(sig, open_positions or [])
+                sig = v2_result.get("signal")
+                if sig:
+                    sig.metadata["v2_decision"] = v2_result["decision"]
+                    sig.metadata["v2_reason"] = v2_result["reason"]
+                    sig.metadata["v2_diagnostics"] = v2_result.get("v2_diagnostics", {})
             if sig:
                 signals.append(sig)
 

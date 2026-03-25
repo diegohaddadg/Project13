@@ -78,6 +78,56 @@ LATENCY_ARB_LATE_REQUIRE_FRESH_5S = True
 LATENCY_ARB_MIN_PRICE_MOVE = 15.0     # USD — minimum |spot - strike| to trade
 LATENCY_ARB_15MIN_ENABLED = False     # False = data-only, no execution for 15min
 
+# --- Latency Arb V2 (refinement layer) ---
+LATENCY_ARB_V2_ENABLED = os.getenv("LATENCY_ARB_V2_ENABLED", "false").lower() == "true"
+
+# Price-quality zones (purchased-side price thresholds)
+V2_PRICE_ZONE_A_MAX = 0.52            # favorable: <= this
+V2_PRICE_ZONE_B_MAX = 0.62            # acceptable: <= this
+V2_PRICE_ZONE_C_MAX = 0.72            # expensive: <= this  (above = zone D)
+
+# Continuous price score anchors
+V2_PRICE_SCORE_BEST = 0.35            # score=1.0 at this price or below
+V2_PRICE_SCORE_WORST = 0.80           # score=0.0 at this price or above
+
+# Adaptive disagreement minimums by price zone
+V2_DISAGREE_MIN_ZONE_A = 0.04         # favorable price tolerates weaker disagreement
+V2_DISAGREE_MIN_ZONE_B = 0.05         # baseline
+V2_DISAGREE_MIN_ZONE_C = 0.07         # expensive requires stronger disagreement
+V2_DISAGREE_MIN_ZONE_D = 0.10         # very expensive requires very strong disagreement
+
+# Overlap / conflict penalties
+V2_OVERLAP_HIGH_THRESHOLD = 3         # start penalizing after this many open positions
+V2_OVERLAP_PER_EXCESS_PENALTY = 0.08  # penalty per excess position above threshold
+V2_CONFLICT_OPPOSITE_PENALTY = 0.15   # penalty per opposite-direction position in same market
+V2_OVERLAP_SAME_DIR_PENALTY = 0.03    # mild penalty per same-direction stack
+V2_OVERLAP_REDUCE_THRESHOLD = 0.20    # overlap penalty above this triggers size reduction
+
+# Composite quality weights (sum should ≈ 1.0)
+V2_WEIGHT_PRICE = 0.30
+V2_WEIGHT_DISAGREEMENT = 0.25
+V2_WEIGHT_URGENCY = 0.10
+V2_WEIGHT_FRESHNESS = 0.10
+V2_WEIGHT_EV = 0.25
+
+# Decision thresholds per zone
+V2_ZONE_D_EXCEPTIONAL_THRESHOLD = 0.75   # quality must exceed this to override zone D reject
+V2_ZONE_D_EXCEPTIONAL_SIZE_MULT = 0.30   # still heavily reduced even if exceptional
+V2_ZONE_C_MIN_QUALITY = 0.35             # below this → reject in zone C
+V2_ZONE_C_FULL_QUALITY = 0.55            # above this → approve full size in zone C
+V2_ZONE_C_REDUCED_SIZE_MULT = 0.50       # size multiplier for borderline zone C
+V2_ZONE_B_MIN_QUALITY = 0.25             # below this → reduce in zone B
+V2_ZONE_B_WEAK_DISAGREE_SIZE_MULT = 0.65 # zone B with weak disagreement
+V2_ZONE_B_LOW_QUALITY_SIZE_MULT = 0.70   # zone B with low quality
+V2_ZONE_A_WEAK_DISAGREE_SIZE_MULT = 0.80 # zone A with weak disagreement (mild cut)
+V2_ZONE_A_OVERLAP_MIN_SIZE_MULT = 0.40  # floor for overlap-based size reduction in zone A
+
+# Composite score internals
+V2_DISAGREE_SURPLUS_NORMALIZER = 0.15   # disagreement surplus of this = perfect score
+V2_URGENCY_FAIL_SCORE = 0.3            # urgency_pass=False contributes this (not 0)
+V2_FRESHNESS_FAIL_SCORE = 0.4          # freshness_pass=False contributes this (not 0)
+V2_EV_NORMALIZER = 0.10                # net_ev at this value = perfect score
+
 # --- Sniper ---
 SNIPER_MAX_TIME = 30           # seconds — sniper only near resolution
 SNIPER_MIN_TIME = 3

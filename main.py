@@ -221,6 +221,13 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
         signals = []
         if not agg.warming_up:
             si = agg.get_signal_input()
+            # Inject lightweight position context for v2 overlap/conflict awareness
+            if config.LATENCY_ARB_V2_ENABLED:
+                si["open_positions"] = [
+                    {"market_id": p.market_id, "market_type": p.market_type,
+                     "direction": p.direction}
+                    for p in pm.get_open_positions()
+                ]
             # Record to tape if enabled
             if tape_recorder:
                 tape_recorder.record(si)
