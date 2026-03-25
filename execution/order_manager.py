@@ -42,6 +42,9 @@ class OrderManager:
         # Dedup tracking: (market_id, direction, strategy) -> last_execute_time
         self._dedup: dict[tuple[str, str, str], float] = {}
 
+        # Last sizing computation detail (for dashboard observability)
+        self._last_sizing_detail: dict = {}
+
         self._load_trade_log()
 
     # --- Public API ---
@@ -246,8 +249,8 @@ class OrderManager:
                 f"have ${self._pm.get_available_capital():.2f}"
             )
 
-        if size_usdc > config.MAX_ORDER_SIZE_USDC:
-            return f"Order size ${size_usdc:.2f} exceeds max ${config.MAX_ORDER_SIZE_USDC:.2f}"
+        if size_usdc > config.MAX_ORDER_SIZE_CEILING_USDC:
+            return f"Order size ${size_usdc:.2f} exceeds ceiling ${config.MAX_ORDER_SIZE_CEILING_USDC:.2f}"
 
         # Duplicate suppression
         dedup_key = (signal.market_id, signal.direction, signal.strategy)
@@ -313,14 +316,76 @@ class OrderManager:
                 "market_snapshot_ts": snapshot.timestamp,
                 "market_age_ms": (time.time() - snapshot.timestamp) * 1000,
                 "price_move_from_strike": abs(signal.spot_price - snapshot.strike_price),
+                # Sizing detail
+                "sizing_binding_cap": self._last_sizing_detail.get("binding_cap", ""),
+                "sizing_equity": self._last_sizing_detail.get("equity", 0),
             },
         )
 
     def _calculate_size_usdc(self, signal: TradeSignal) -> float:
-        """Calculate USDC size from signal's recommended_size_pct and available capital."""
-        capital = self._pm.get_available_capital()
-        size = capital * signal.recommended_size_pct
-        return min(size, config.MAX_ORDER_SIZE_USDC)
+        """Calculate USDC size using current total equity as the sizing base.
+
+        Flow:
+          1. kelly_suggested = total_equity * recommended_size_pct
+          2. pct_cap = total_equity * MAX_ORDER_SIZE_PCT
+          3. Apply ceiling, floor, and free-capital clamp
+        """
+        equity = self._pm.get_total_equity()
+        free_capital = self._pm.get_available_capital()
+
+        # Step 1: Kelly-suggested size against total equity
+        kelly_suggested = equity * signal.recommended_size_pct
+
+        # Step 2: Percentage cap against total equity
+        pct_cap = equity * config.MAX_ORDER_SIZE_PCT
+
+        # Step 3: Take the lesser of Kelly and pct cap
+        size = min(kelly_suggested, pct_cap)
+
+        # Step 4: Apply absolute ceiling
+        size = min(size, config.MAX_ORDER_SIZE_CEILING_USDC)
+
+        # Step 5: Apply floor (only if equity can support it)
+        if equity >= config.MAX_ORDER_SIZE_FLOOR_USDC:
+            size = max(size, config.MAX_ORDER_SIZE_FLOOR_USDC)
+
+        # Step 6: Final availability clamp — never exceed free capital
+        size = min(size, free_capital)
+
+        # Record which cap was binding (for observability)
+        self._last_sizing_detail = {
+            "equity": equity,
+            "free_capital": free_capital,
+            "kelly_pct": signal.recommended_size_pct,
+            "kelly_suggested": kelly_suggested,
+            "pct_cap": pct_cap,
+            "ceiling": config.MAX_ORDER_SIZE_CEILING_USDC,
+            "floor": config.MAX_ORDER_SIZE_FLOOR_USDC,
+            "final_size": size,
+            "binding_cap": self._identify_binding_cap(
+                kelly_suggested, pct_cap, size, free_capital, equity),
+        }
+
+        return size
+
+    @staticmethod
+    def _identify_binding_cap(
+        kelly: float, pct_cap: float, final: float, free_capital: float, equity: float
+    ) -> str:
+        """Identify which cap determined the final order size."""
+        if final <= 0:
+            return "zero"
+        if final >= free_capital - 0.01:
+            return "free_capital"
+        if final >= config.MAX_ORDER_SIZE_CEILING_USDC - 0.01:
+            return "ceiling"
+        if final <= config.MAX_ORDER_SIZE_FLOOR_USDC + 0.01 and equity >= config.MAX_ORDER_SIZE_FLOOR_USDC:
+            return "floor"
+        if abs(final - pct_cap) < 0.01:
+            return "pct_cap"
+        if abs(final - kelly) < 0.01:
+            return "kelly"
+        return "kelly"
 
     def _record_dedup(self, signal: TradeSignal) -> None:
         key = (signal.market_id, signal.direction, signal.strategy)

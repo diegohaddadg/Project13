@@ -36,10 +36,11 @@ class ExposureTracker:
         )
 
     def get_exposure_pct(self) -> float:
-        """Total exposure as percentage of starting capital."""
-        if config.STARTING_CAPITAL_USDC <= 0:
+        """Total exposure as percentage of current total equity."""
+        equity = self._pm.get_total_equity()
+        if equity <= 0:
             return 0.0
-        return self.get_total_exposure() / config.STARTING_CAPITAL_USDC
+        return self.get_total_exposure() / equity
 
     def get_available_capital(self) -> float:
         return self._pm.get_available_capital()
@@ -47,17 +48,23 @@ class ExposureTracker:
     def would_exceed_limits(
         self, new_order_size: float, market_id: str | None = None
     ) -> bool:
-        """Check if a proposed order would breach exposure limits."""
+        """Check if a proposed order would breach exposure limits.
+
+        Limits are computed against current total equity (not starting capital),
+        so they scale naturally as the account grows.
+        """
+        equity = self._pm.get_total_equity()
+
         # Total exposure check
         new_total = self.get_total_exposure() + new_order_size
-        total_limit = config.STARTING_CAPITAL_USDC * config.MAX_TOTAL_EXPOSURE_PCT
+        total_limit = equity * config.MAX_TOTAL_EXPOSURE_PCT
         if new_total > total_limit:
             return True
 
         # Per-market check
         if market_id:
             current_market = self.get_exposure_by_market(market_id)
-            market_limit = config.STARTING_CAPITAL_USDC * config.MAX_SINGLE_MARKET_EXPOSURE_PCT
+            market_limit = equity * config.MAX_SINGLE_MARKET_EXPOSURE_PCT
             if current_market + new_order_size > market_limit:
                 return True
 

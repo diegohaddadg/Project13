@@ -358,6 +358,13 @@ class StateAdapter:
             "rejected_count": self._om.rejected_count,
             "rejection_breakdown": self._om.rejection_breakdown,
             "recent_rejections": self._om.recent_rejections[-10:],
+            "sizing": {
+                "max_order_pct": config.MAX_ORDER_SIZE_PCT,
+                "computed_max_order_usdc": total_equity * config.MAX_ORDER_SIZE_PCT,
+                "floor_usdc": config.MAX_ORDER_SIZE_FLOOR_USDC,
+                "ceiling_usdc": config.MAX_ORDER_SIZE_CEILING_USDC,
+                "last_sizing_detail": self._om._last_sizing_detail,
+            },
         }
 
     def get_performance_snapshot(self) -> dict:

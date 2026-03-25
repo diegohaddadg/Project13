@@ -101,7 +101,11 @@ SIZE_TIER_LOW = 0.05
 TRADING_ENABLED = os.getenv("TRADING_ENABLED", "true").lower() == "true"
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "paper")
 LIVE_TRADING_CONFIRMATION = os.getenv("LIVE_TRADING_CONFIRMATION", "")
-MAX_ORDER_SIZE_USDC = 50.0
+# Dynamic order sizing — scales with current total equity
+MAX_ORDER_SIZE_PCT = 0.08              # max single order = 8% of current total equity
+MAX_ORDER_SIZE_FLOOR_USDC = 5.0        # minimum order size (prevents dust orders)
+MAX_ORDER_SIZE_CEILING_USDC = 500.0    # absolute ceiling regardless of equity
+MAX_ORDER_SIZE_USDC = MAX_ORDER_SIZE_CEILING_USDC  # legacy alias (used by live_trader safety gate)
 MAX_SIGNAL_AGE_SECONDS = 2
 MAX_ENTRIES_PER_WINDOW = 3     # max positions in same market
 MAX_CONCURRENT_POSITIONS = 6   # total open positions across all markets
