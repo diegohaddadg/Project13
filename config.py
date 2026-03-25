@@ -122,6 +122,22 @@ V2_ZONE_B_LOW_QUALITY_SIZE_MULT = 0.70   # zone B with low quality
 V2_ZONE_A_WEAK_DISAGREE_SIZE_MULT = 0.80 # zone A with weak disagreement (mild cut)
 V2_ZONE_A_OVERLAP_MIN_SIZE_MULT = 0.40  # floor for overlap-based size reduction in zone A
 
+# --- V2.1 Downside Control (directional refinement for DOWN trades) ---
+# Extra disagreement bump for DOWN in expensive zones (added to base zone min)
+V2_1_DOWN_DISAGREE_BUMP_ZONE_B = 0.01   # zone B: 0.05 + 0.01 = 0.06 for DOWN
+V2_1_DOWN_DISAGREE_BUMP_ZONE_C = 0.02   # zone C: 0.07 + 0.02 = 0.09 for DOWN
+V2_1_DOWN_DISAGREE_BUMP_ZONE_D = 0.02   # zone D: 0.10 + 0.02 = 0.12 for DOWN
+# Extra quality requirement for DOWN in expensive zones
+V2_1_DOWN_QUALITY_BUMP_ZONE_C = 0.08    # zone C min_quality: 0.35 + 0.08 = 0.43 for DOWN
+V2_1_DOWN_QUALITY_BUMP_ZONE_C_FULL = 0.07  # zone C full_quality: 0.55 + 0.07 = 0.62 for DOWN
+V2_1_DOWN_QUALITY_BUMP_ZONE_B = 0.05    # zone B min_quality: 0.25 + 0.05 = 0.30 for DOWN
+# Stronger size reduction for borderline DOWN trades
+V2_1_DOWN_REDUCE_SIZE_MULT = 0.75       # extra multiplier applied on top of zone-based reduction
+# DOWN composite quality penalty (subtracted from raw quality for DOWN signals)
+V2_1_DOWN_QUALITY_PENALTY = 0.04        # mild drag on all DOWN composite scores
+# Zone A: even favorable-price DOWN with weak disagreement gets harsher cut
+V2_1_DOWN_ZONE_A_WEAK_DISAGREE_SIZE_MULT = 0.65  # vs 0.80 for UP
+
 # Composite score internals
 V2_DISAGREE_SURPLUS_NORMALIZER = 0.15   # disagreement surplus of this = perfect score
 V2_URGENCY_FAIL_SCORE = 0.3            # urgency_pass=False contributes this (not 0)

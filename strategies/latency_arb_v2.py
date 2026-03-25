@@ -157,10 +157,13 @@ def _composite_quality(
     freshness_pass: bool,
     overlap_penalty: float,
     net_ev: float,
+    direction: str = "UP",
 ) -> float:
     """Compute composite quality score 0-1 for the entry.
 
     Higher is better. Used to decide approve/reduce/reject.
+    v2.1: DOWN trades receive a mild quality penalty to reflect
+    observed weaker performance on bearish entries.
     """
     # Disagreement surplus: how much above the adaptive minimum
     disagree_surplus = max(0.0, disagreement - min_disagreement)
@@ -180,6 +183,10 @@ def _composite_quality(
         + config.V2_WEIGHT_FRESHNESS * freshness_score
         + config.V2_WEIGHT_EV * ev_score
     )
+
+    # v2.1: directional penalty for DOWN trades
+    if direction == "DOWN":
+        raw = max(0.0, raw - config.V2_1_DOWN_QUALITY_PENALTY)
 
     # Apply overlap penalty as a multiplier
     adjusted = raw * (1.0 - overlap_penalty)
@@ -223,6 +230,16 @@ def refine(
 
     # --- Adaptive disagreement ---
     min_disagree = _adaptive_min_disagreement(zone)
+    is_down = signal.direction == "DOWN"
+
+    # v2.1: bump disagreement requirement for DOWN in expensive zones
+    if is_down:
+        down_bumps = {
+            "B": config.V2_1_DOWN_DISAGREE_BUMP_ZONE_B,
+            "C": config.V2_1_DOWN_DISAGREE_BUMP_ZONE_C,
+            "D": config.V2_1_DOWN_DISAGREE_BUMP_ZONE_D,
+        }
+        min_disagree += down_bumps.get(zone, 0.0)
 
     # --- Overlap / conflict ---
     overlap = _compute_overlap_penalty(signal, open_positions or [])
@@ -240,6 +257,7 @@ def refine(
         freshness_pass=freshness_pass,
         overlap_penalty=overlap["penalty"],
         net_ev=signal.net_ev,
+        direction=signal.direction,
     )
 
     # --- Build diagnostics (compact) ---
@@ -253,6 +271,8 @@ def refine(
         "overlap_reason": overlap["reason"],
         "open_count": overlap["open_count"],
         "composite_quality": round(quality, 3),
+        "direction": signal.direction,
+        "v2_1_down_active": is_down,
     }
 
     # --- Decision logic ---
@@ -268,14 +288,21 @@ def refine(
 
     # Zone C: require strong quality, otherwise reduce or reject
     if zone == "C":
+        # v2.1: DOWN gets higher quality thresholds in zone C
+        c_min_q = config.V2_ZONE_C_MIN_QUALITY + (config.V2_1_DOWN_QUALITY_BUMP_ZONE_C if is_down else 0.0)
+        c_full_q = config.V2_ZONE_C_FULL_QUALITY + (config.V2_1_DOWN_QUALITY_BUMP_ZONE_C_FULL if is_down else 0.0)
+
         if disagreement < min_disagree:
             return _reject_result(diag,
                                   f"zone_C_weak_disagree: {disagreement:.3f} < {min_disagree:.3f}")
-        if quality < config.V2_ZONE_C_MIN_QUALITY:
+        if quality < c_min_q:
             return _reject_result(diag,
-                                  f"zone_C_low_quality: {quality:.3f} < {config.V2_ZONE_C_MIN_QUALITY}")
-        if quality < config.V2_ZONE_C_FULL_QUALITY:
+                                  f"zone_C_low_quality: {quality:.3f} < {c_min_q:.3f}")
+        if quality < c_full_q:
             size_mult = config.V2_ZONE_C_REDUCED_SIZE_MULT
+            # v2.1: DOWN gets additional size reduction for borderline zone C
+            if is_down:
+                size_mult *= config.V2_1_DOWN_REDUCE_SIZE_MULT
             return _reduce_result(signal, size_mult, diag,
                                   f"zone_C_reduce: quality={quality:.3f}")
         # Strong enough for full size
@@ -284,13 +311,21 @@ def refine(
 
     # Zone B: moderate scrutiny
     if zone == "B":
+        # v2.1: DOWN gets higher quality threshold in zone B
+        b_min_q = config.V2_ZONE_B_MIN_QUALITY + (config.V2_1_DOWN_QUALITY_BUMP_ZONE_B if is_down else 0.0)
+
         if disagreement < min_disagree:
             # Weak disagreement at acceptable price — reduce rather than reject
             size_mult = config.V2_ZONE_B_WEAK_DISAGREE_SIZE_MULT
+            # v2.1: DOWN gets additional size reduction for weak disagreement
+            if is_down:
+                size_mult *= config.V2_1_DOWN_REDUCE_SIZE_MULT
             return _reduce_result(signal, size_mult, diag,
                                   f"zone_B_weak_disagree: {disagreement:.3f} < {min_disagree:.3f}")
-        if quality < config.V2_ZONE_B_MIN_QUALITY:
+        if quality < b_min_q:
             size_mult = config.V2_ZONE_B_LOW_QUALITY_SIZE_MULT
+            if is_down:
+                size_mult *= config.V2_1_DOWN_REDUCE_SIZE_MULT
             return _reduce_result(signal, size_mult, diag,
                                   f"zone_B_low_quality: {quality:.3f}")
         diag["decision_path"] = "zone_B_approve"
@@ -299,7 +334,9 @@ def refine(
     # Zone A: favorable — most permissive
     if disagreement < min_disagree:
         # Even at good price, very weak disagreement gets a mild size cut
-        size_mult = config.V2_ZONE_A_WEAK_DISAGREE_SIZE_MULT
+        # v2.1: DOWN gets a harsher cut than UP at zone A weak disagree
+        size_mult = (config.V2_1_DOWN_ZONE_A_WEAK_DISAGREE_SIZE_MULT if is_down
+                     else config.V2_ZONE_A_WEAK_DISAGREE_SIZE_MULT)
         return _reduce_result(signal, size_mult, diag,
                               f"zone_A_weak_disagree: {disagreement:.3f} < {min_disagree:.3f}")
 
