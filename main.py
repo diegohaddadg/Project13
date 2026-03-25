@@ -235,6 +235,15 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
                 risk_result = rm.evaluate_signal(sig, portfolio_state)
 
                 # Trace every signal through the pipeline
+                # Exposure diagnostics from risk manager (observability only)
+                exp_diag = risk_result.get("exposure_diag") or {}
+
+                # Overlap diagnostics (observability only — no behavior change)
+                _open = pm.get_open_positions()
+                _same_mkt = [p for p in _open if p.market_id == sig.market_id]
+                _same_dir = [p for p in _same_mkt if p.direction == sig.direction]
+                _opp_dir = [p for p in _same_mkt if p.direction != sig.direction]
+
                 trace = {
                     "ts": time.time(),
                     "signal_id": sig.signal_id,
@@ -261,6 +270,24 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
                     "disagreement": sig.metadata.get("disagreement"),
                     "risk_decision": risk_result["decision"],
                     "risk_reason": risk_result["reason"],
+                    # Sizing observability
+                    "sizing_equity": portfolio_state["current_capital"],
+                    "sizing_free_capital": pm.get_available_capital(),
+                    "sizing_kelly_pct": sig.recommended_size_pct,
+                    "sizing_desired_usd": portfolio_state["current_capital"] * sig.recommended_size_pct,
+                    "sizing_pct_cap_usd": portfolio_state["current_capital"] * config.MAX_ORDER_SIZE_PCT,
+                    # Exposure observability
+                    "exposure_total_pct": exp_diag.get("total_exposure_pct", 0),
+                    "exposure_total_after_pct": exp_diag.get("total_after_pct", 0),
+                    "exposure_market_usd": exp_diag.get("market_exposure_usd", 0),
+                    "exposure_would_breach": exp_diag.get("total_would_breach", False) or exp_diag.get("market_would_breach", False),
+                    # Overlap observability
+                    "open_positions_count": len(_open),
+                    "same_market_positions": len(_same_mkt),
+                    "same_direction_positions": len(_same_dir),
+                    "opposite_direction_positions": len(_opp_dir),
+                    "overlap_detected": len(_same_mkt) > 0,
+                    "conflict_detected": len(_opp_dir) > 0,
                 }
 
                 if risk_result["decision"] in ("APPROVE", "REDUCE"):
@@ -275,6 +302,8 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
                         trace["execution_path"] = order.metadata.get("execution_path", "unknown")
                         trace["fee_mode"] = order.metadata.get("fee_mode", "unknown")
                         trace["market_age_ms"] = order.metadata.get("market_age_ms")
+                        trace["sizing_binding_cap"] = order.metadata.get("sizing_binding_cap", "")
+                        trace["sizing_final_equity"] = order.metadata.get("sizing_equity", 0)
                 else:
                     trace["order_status"] = "not_submitted"
 

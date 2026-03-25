@@ -51,6 +51,9 @@ class RiskManager:
         self._risk_rejections: int = 0
         self._session_start_equity: float = 0.0  # set once by set_session_start_equity()
 
+        # Last exposure diagnostics (observability only)
+        self._last_exposure_diag: dict = {}
+
         self._reset_daily_if_needed()
 
     def _paper_warn_only(self) -> bool:
@@ -93,6 +96,11 @@ class RiskManager:
         current_capital = portfolio_state.get("current_capital", 0)
         volatility = portfolio_state.get("volatility")
         daily_loss_cap_usd = self.daily_loss_limit_usd()
+
+        # Compute exposure diagnostics once (observability — no behavior change)
+        proposed_size = current_capital * signal.recommended_size_pct
+        self._last_exposure_diag = self._exposure.get_diagnostics(
+            proposed_size, signal.market_id)
 
         # Update analytics HWM
         self._analytics.update_hwm(current_capital)
@@ -227,9 +235,11 @@ class RiskManager:
                 "decision": "REDUCE",
                 "adjusted_signal": adjusted,
                 "reason": "; ".join(reason_notes),
+                "exposure_diag": self._last_exposure_diag,
             }
 
-        return {"decision": "APPROVE", "adjusted_signal": signal, "reason": "All risk checks passed"}
+        return {"decision": "APPROVE", "adjusted_signal": signal, "reason": "All risk checks passed",
+                "exposure_diag": self._last_exposure_diag}
 
     def record_trade_result(self, position: Position) -> None:
         """Update risk state after a position closes."""
@@ -329,7 +339,8 @@ class RiskManager:
     def _reject(self, reason: str) -> dict:
         self._risk_rejections += 1
         log.info(f"[RISK] REJECT: {reason}")
-        return {"decision": "REJECT", "adjusted_signal": None, "reason": reason}
+        return {"decision": "REJECT", "adjusted_signal": None, "reason": reason,
+                "exposure_diag": self._last_exposure_diag}
 
     def _reduce(self, signal: TradeSignal, new_size_pct: float, reason: str) -> dict:
         adjusted = copy(signal)
@@ -340,7 +351,8 @@ class RiskManager:
             f"[RISK] REDUCE: {reason} "
             f"(size {signal.recommended_size_pct:.0%} → {new_size_pct:.0%})"
         )
-        return {"decision": "REDUCE", "adjusted_signal": adjusted, "reason": reason}
+        return {"decision": "REDUCE", "adjusted_signal": adjusted, "reason": reason,
+                "exposure_diag": self._last_exposure_diag}
 
     def _reset_daily_if_needed(self) -> None:
         """Reset daily PnL at configured UTC hour."""

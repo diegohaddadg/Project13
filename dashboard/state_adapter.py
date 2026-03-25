@@ -365,6 +365,31 @@ class StateAdapter:
                 "ceiling_usdc": config.MAX_ORDER_SIZE_CEILING_USDC,
                 "last_sizing_detail": self._om._last_sizing_detail,
             },
+            "exposure": self._rm._exposure.get_diagnostics(),
+            "overlap": self._compute_overlap_summary(open_pos),
+        }
+
+    @staticmethod
+    def _compute_overlap_summary(open_positions) -> dict:
+        """Compute overlap/conflict flags across open positions (observability only)."""
+        by_market: dict[str, list] = {}
+        for p in open_positions:
+            by_market.setdefault(p.market_id, []).append(p)
+
+        overlap_markets = 0
+        conflict_markets = 0
+        for mid, positions in by_market.items():
+            if len(positions) > 1:
+                overlap_markets += 1
+                dirs = set(p.direction for p in positions)
+                if len(dirs) > 1:
+                    conflict_markets += 1
+
+        return {
+            "total_open": len(open_positions),
+            "distinct_markets": len(by_market),
+            "overlap_markets": overlap_markets,
+            "conflict_markets": conflict_markets,
         }
 
     def get_performance_snapshot(self) -> dict:

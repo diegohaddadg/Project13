@@ -395,8 +395,14 @@ class OrderManager:
         self._dedup = {k: v for k, v in self._dedup.items() if v > cutoff}
 
     def _log_lifecycle(self, order, position) -> None:
-        """Log fill-to-position lifecycle event."""
+        """Log fill-to-position lifecycle event with overlap and sizing detail."""
         try:
+            open_pos = self._pm.get_open_positions()
+            same_market = [p for p in open_pos if p.market_id == order.market_id]
+            same_dir = [p for p in same_market if p.direction == order.direction]
+            opp_dir = [p for p in same_market if p.direction != order.direction]
+
+            sd = self._last_sizing_detail
             entry = {
                 "event": "fill_to_position",
                 "ts": time.time(),
@@ -405,11 +411,28 @@ class OrderManager:
                 "market_id": order.market_id,
                 "market_type": order.market_type,
                 "direction": order.direction,
+                "strategy": order.metadata.get("strategy", ""),
                 "fill_price": order.fill_price,
                 "size_usdc": order.size_usdc,
                 "num_shares": order.num_shares,
-                "open_positions_count": self._pm.count_open_positions(),
+                "open_positions_count": len(open_pos),
                 "available_capital": self._pm.get_available_capital(),
+                "total_equity": self._pm.get_total_equity(),
+                # Sizing observability
+                "sizing_equity": sd.get("equity", 0),
+                "sizing_kelly_suggested": sd.get("kelly_suggested", 0),
+                "sizing_pct_cap": sd.get("pct_cap", 0),
+                "sizing_binding_cap": sd.get("binding_cap", ""),
+                "sizing_kelly_pct": sd.get("kelly_pct", 0),
+                "sizing_floor_applied": sd.get("final_size", 0) <= sd.get("floor", 0) + 0.01 and sd.get("equity", 0) >= sd.get("floor", 0),
+                "sizing_ceiling_applied": sd.get("final_size", 0) >= sd.get("ceiling", 999999) - 0.01,
+                "sizing_free_capital_clamped": sd.get("final_size", 0) >= sd.get("free_capital", 999999) - 0.01,
+                # Overlap observability
+                "same_market_positions": len(same_market),
+                "same_direction_positions": len(same_dir),
+                "opposite_direction_positions": len(opp_dir),
+                "overlap_detected": len(same_market) > 1,
+                "conflict_detected": len(opp_dir) > 0,
             }
             p = Path("logs/fill_to_position_trace.jsonl")
             p.parent.mkdir(parents=True, exist_ok=True)
