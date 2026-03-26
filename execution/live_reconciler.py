@@ -249,24 +249,31 @@ class LiveReconciler:
 
     def _check_and_redeem(self, summary: dict) -> None:
         """Check for resolved markets and handle winning/losing positions."""
-        for pos in list(self._pm.get_open_positions()):
-            if pos.metadata.get("execution_mode") != "live":
-                continue
-            if pos.metadata.get("redeemed"):
-                continue
-            # Skip positions already marked claimable (waiting for manual action)
+        open_live = [
+            p for p in self._pm.get_open_positions()
+            if p.metadata.get("execution_mode") == "live" and not p.metadata.get("redeemed")
+        ]
+
+        if open_live:
+            log.info(f"[RECON] Checking {len(open_live)} live positions for resolution/redemption")
+
+        for pos in list(open_live):
+            condition_id = pos.metadata.get("condition_id", "")
+            pos_token = pos.metadata.get("token_id", "")
+
+            # Handle CLAIMABLE positions
             if pos.status == "CLAIMABLE":
-                # Still count for dashboard visibility
+                retry_count = pos.metadata.get("redeem_retry_count", 0)
+                if retry_count >= config.LIVE_REDEEM_MAX_RETRIES:
+                    self._detect_external_claim(pos, condition_id, summary)
+                    continue
                 cooldown_until = self._redeem_cooldowns.get(pos.position_id, 0)
-                if time.time() >= cooldown_until:
-                    # Retry redemption for CLAIMABLE positions
-                    condition_id = pos.metadata.get("condition_id", "")
-                    if condition_id:
-                        self._attempt_redemption(pos, condition_id, summary)
+                if time.time() >= cooldown_until and condition_id:
+                    self._attempt_redemption(pos, condition_id, summary)
                 continue
 
-            condition_id = pos.metadata.get("condition_id", "")
             if not condition_id:
+                log.info(f"[RECON] Skipping {pos.position_id}: no condition_id in metadata")
                 continue
 
             # Check cooldown
@@ -275,61 +282,160 @@ class LiveReconciler:
                 continue
 
             # Check if market is resolved on exchange
+            log.info(
+                f"[RECON] RESOLUTION CHECK START: pos={pos.position_id} "
+                f"direction={pos.direction} condition={condition_id[:16]}... "
+                f"token={pos_token[-12:] if pos_token else 'NONE'}"
+            )
+
             resolved_info = self._check_market_resolved(condition_id)
             if resolved_info is None:
+                log.info(f"[RECON] RESOLUTION CHECK: no result for {pos.position_id}")
                 continue
 
             is_resolved = resolved_info.get("resolved", False)
             if not is_resolved:
+                log.info(f"[RECON] RESOLUTION CHECK: market NOT resolved for {pos.position_id}")
                 continue
 
             # Determine if this position won
             winning_token = resolved_info.get("winning_token_id", "")
-            pos_token = pos.metadata.get("token_id", "")
+
+            log.warning(
+                f"[RECON] RESOLUTION DETECTED: pos={pos.position_id} "
+                f"direction={pos.direction} market={pos.market_type} "
+                f"condition={condition_id[:16]}... "
+                f"pos_token=...{pos_token[-12:] if pos_token else 'NONE'} "
+                f"winning_token=...{winning_token[-12:] if winning_token else 'NONE'}"
+            )
 
             if not winning_token or not pos_token:
+                log.warning(
+                    f"[RECON] Cannot determine winner: "
+                    f"winning_token={'SET' if winning_token else 'MISSING'} "
+                    f"pos_token={'SET' if pos_token else 'MISSING'}"
+                )
                 continue
 
             won = (pos_token == winning_token)
 
             if won:
                 log.warning(
-                    f"[RECON] WIN DETECTED: {pos.direction} {pos.market_type} "
+                    f"[RECON] WINNER IDENTIFIED: {pos.direction} {pos.market_type} "
                     f"{pos.num_shares:.1f}sh @{pos.entry_price:.3f} "
                     f"condition={condition_id[:16]}..."
                 )
                 self._attempt_redemption(pos, condition_id, summary)
             else:
-                # Loss — close position locally with resolution_price=0
+                log.warning(
+                    f"[RECON] LOSER IDENTIFIED: {pos.direction} {pos.market_type} "
+                    f"{pos.num_shares:.1f}sh @{pos.entry_price:.3f}"
+                )
                 self._close_losing_position(pos, summary)
 
     def _check_market_resolved(self, condition_id: str) -> Optional[dict]:
-        """Check if a market has resolved via the CLOB API."""
-        try:
-            # Try CLOB /markets endpoint with condition_id
-            resp = self._client.get_market(condition_id=condition_id)
-            if resp is None:
-                return None
+        """Check if a market has resolved via the CLOB API.
 
-            if isinstance(resp, dict):
-                resolved = resp.get("closed", False) or resp.get("resolved", False)
-                # Determine winning token from resolution data
-                winning_token_id = ""
-                if resolved:
-                    tokens = resp.get("tokens", [])
-                    for t in tokens:
-                        if isinstance(t, dict) and _safe_float(t.get("winner", 0)) == 1.0:
-                            winning_token_id = t.get("token_id", "")
-                            break
-                return {
-                    "resolved": resolved,
-                    "winning_token_id": winning_token_id,
-                    "raw": _truncate_dict(resp),
-                }
-            return None
+        Tries multiple call patterns since py-clob-client versions differ.
+        """
+        resp = None
+
+        # Attempt 1: get_market(condition_id) — positional
+        try:
+            resp = self._client.get_market(condition_id)
         except Exception as e:
-            log.debug(f"[RECON] Market resolution check failed for {condition_id[:16]}: {e}")
+            log.info(f"[RECON] get_market(positional) failed: {e}")
+
+        # Attempt 2: get_market(condition_id=condition_id) — keyword
+        if resp is None:
+            try:
+                resp = self._client.get_market(condition_id=condition_id)
+            except Exception as e:
+                log.info(f"[RECON] get_market(keyword) failed: {e}")
+
+        # Attempt 3: Use the Gamma API directly via HTTP
+        if resp is None:
+            try:
+                import requests
+                gamma_url = f"https://gamma-api.polymarket.com/markets?conditionId={condition_id}"
+                r = requests.get(gamma_url, timeout=5)
+                if r.status_code == 200:
+                    data = r.json()
+                    if isinstance(data, list) and len(data) > 0:
+                        resp = data[0]
+                        log.info(f"[RECON] Resolution check via Gamma API succeeded")
+                    else:
+                        log.info(f"[RECON] Gamma API returned empty for {condition_id[:16]}")
+                else:
+                    log.info(f"[RECON] Gamma API returned status {r.status_code}")
+            except Exception as e:
+                log.warning(f"[RECON] Gamma API resolution check failed: {e}")
+
+        if resp is None:
+            log.warning(
+                f"[RECON] RESOLUTION CHECK FAILED: all methods failed for "
+                f"condition={condition_id[:16]}... — cannot determine if market resolved"
+            )
             return None
+
+        if not isinstance(resp, dict):
+            log.warning(f"[RECON] RESOLUTION CHECK: unexpected response type {type(resp).__name__}")
+            return None
+
+        # Parse resolution status
+        # Gamma API: "closed" field. CLOB: may use "resolved" or "closed"
+        resolved = resp.get("closed", False) or resp.get("resolved", False)
+
+        # Determine winning token
+        winning_token_id = ""
+        if resolved:
+            # CLOB format: tokens list with winner field
+            tokens = resp.get("tokens", [])
+            for t in tokens:
+                if isinstance(t, dict) and _safe_float(t.get("winner", 0)) == 1.0:
+                    winning_token_id = t.get("token_id", "")
+                    break
+
+            # Gamma format: may not have tokens with winner field
+            # Check clobTokenIds + outcomePrices as fallback
+            if not winning_token_id:
+                clob_token_ids = resp.get("clobTokenIds")
+                if isinstance(clob_token_ids, str):
+                    try:
+                        import json as _json
+                        clob_token_ids = _json.loads(clob_token_ids)
+                    except Exception:
+                        clob_token_ids = []
+                if isinstance(clob_token_ids, list) and len(clob_token_ids) >= 2:
+                    # Check outcomePrices: the winning outcome should be ~1.0
+                    outcome_prices = resp.get("outcomePrices")
+                    if isinstance(outcome_prices, str):
+                        try:
+                            import json as _json
+                            outcome_prices = _json.loads(outcome_prices)
+                        except Exception:
+                            outcome_prices = []
+                    if isinstance(outcome_prices, list) and len(outcome_prices) >= 2:
+                        try:
+                            p0 = float(outcome_prices[0])
+                            p1 = float(outcome_prices[1])
+                            if p0 > 0.9:
+                                winning_token_id = str(clob_token_ids[0])
+                            elif p1 > 0.9:
+                                winning_token_id = str(clob_token_ids[1])
+                        except (ValueError, TypeError):
+                            pass
+
+        log.info(
+            f"[RECON] RESOLUTION CHECK: condition={condition_id[:16]}... "
+            f"resolved={resolved} winning_token={'...'+winning_token_id[-8:] if winning_token_id else 'NONE'}"
+        )
+
+        return {
+            "resolved": resolved,
+            "winning_token_id": winning_token_id,
+            "raw": _truncate_dict(resp),
+        }
 
     def _attempt_redemption(self, pos: Position, condition_id: str, summary: dict) -> None:
         """Attempt to redeem a winning resolved position.
@@ -352,9 +458,11 @@ class LiveReconciler:
             return
 
         log.warning(
-            f"[RECON] REDEEMING: {pos.direction} {pos.market_type} "
+            f"[RECON] REDEEM START: {pos.direction} {pos.market_type} "
             f"{pos.num_shares:.1f}sh @{pos.entry_price:.3f} "
-            f"condition={condition_id[:16]}... (attempt {retry_count + 1}/{config.LIVE_REDEEM_MAX_RETRIES})"
+            f"condition={condition_id[:16]}... "
+            f"attempt={retry_count + 1}/{config.LIVE_REDEEM_MAX_RETRIES} "
+            f"token=...{pos.metadata.get('token_id', '')[-12:]}"
         )
 
         try:
@@ -428,7 +536,14 @@ class LiveReconciler:
         Returns True only if redemption is confirmed successful.
         """
         # On-chain redemption via NegRiskAdapter (routed through proxy for proxy wallets)
-        if self._ensure_onchain_redeemer():
+        redeemer_ready = self._ensure_onchain_redeemer()
+        log.warning(
+            f"[RECON] REDEEM PATH CHOSEN: "
+            f"onchain_redeemer={'READY' if redeemer_ready else 'NOT AVAILABLE'} "
+            f"condition={condition_id[:16]}..."
+        )
+
+        if redeemer_ready:
             try:
                 result = self._onchain_redeemer.redeem(condition_id)
                 if result["success"]:
@@ -464,6 +579,53 @@ class LiveReconciler:
             log.warning(
                 f"[RECON] LOSS DETECTED: {pos.direction} {pos.market_type} "
                 f"PnL={resolved_pos.pnl:+.2f}"
+            )
+
+    def _detect_external_claim(self, pos: Position, condition_id: str, summary: dict) -> None:
+        """Detect if a CLAIMABLE winning position was claimed manually on Polymarket.
+
+        After max auto-redeem retries, the user may have claimed manually.
+        If the market is confirmed resolved as a winner for this position's token,
+        close the position locally with resolution_price=1.0 (full win payout).
+
+        The cash IS in the Polymarket wallet — our local state just hasn't caught up.
+        """
+        if not condition_id:
+            return
+
+        # Re-verify the market is resolved and this position won
+        resolved_info = self._check_market_resolved(condition_id)
+        if resolved_info is None or not resolved_info.get("resolved"):
+            return
+
+        winning_token = resolved_info.get("winning_token_id", "")
+        pos_token = pos.metadata.get("token_id", "")
+        if not winning_token or not pos_token or pos_token != winning_token:
+            return
+
+        # Market is resolved, this position's token won, auto-redeem exhausted.
+        # Close locally with correct accounting (resolution_price=1.0 = full win).
+        claimable_since = pos.metadata.get("claimable_since", 0)
+        age = time.time() - claimable_since if claimable_since else 0
+
+        resolved_pos = self._pm.close_position(pos.position_id, 1.0)
+        if resolved_pos:
+            resolved_pos.metadata["external_claim"] = True
+            resolved_pos.metadata["external_claim_ts"] = time.time()
+            resolved_pos.metadata["redeemed"] = True
+            if resolved_pos.order_id and resolved_pos.pnl is not None:
+                self._om.sync_order_pnl_from_position(
+                    resolved_pos.order_id, resolved_pos.pnl
+                )
+
+            self._redeemed_count += 1
+            summary["redemptions_this_cycle"] += 1
+
+            log.warning(
+                f"[RECON] EXTERNAL CLAIM DETECTED: {pos.direction} {pos.market_type} "
+                f"{pos.num_shares:.1f}sh — was CLAIMABLE for {age:.0f}s, "
+                f"closing locally as WIN. PnL={resolved_pos.pnl:+.2f} "
+                f"Capital restored: ${self._pm.get_available_capital():.2f}"
             )
 
     def _schedule_retry(self, pos: Position) -> None:
