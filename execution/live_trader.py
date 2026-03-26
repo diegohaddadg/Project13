@@ -45,7 +45,21 @@ class LiveTrader:
         Call this once at startup when EXECUTION_MODE == "live".
         Returns True if ready, False if initialization failed.
         """
+        import os
         from utils.polymarket_auth import validate_live_credentials
+
+        # --- Startup config dump ---
+        log.warning("[LIVE] ===== LIVE TRADER INITIALIZATION =====")
+        log.warning(f"[LIVE] EXECUTION_MODE={config.EXECUTION_MODE}")
+        log.warning(f"[LIVE] TRADING_ENABLED={config.TRADING_ENABLED}")
+        log.warning(f"[LIVE] LIVE_TRADING_CONFIRMATION={'SET' if config.LIVE_TRADING_CONFIRMATION == 'I_UNDERSTAND' else 'NOT_SET'}")
+        log.warning(f"[LIVE] POLYMARKET_SIGNATURE_TYPE={os.getenv('POLYMARKET_SIGNATURE_TYPE', '0')}")
+        funder = os.getenv("POLYMARKET_FUNDER", "")
+        log.warning(f"[LIVE] POLYMARKET_FUNDER={funder[:10]}...{funder[-6:]}" if funder else "[LIVE] POLYMARKET_FUNDER=NOT_SET")
+        log.warning(f"[LIVE] POLYMARKET_PRIVATE_KEY={'SET' if os.getenv('POLYMARKET_PRIVATE_KEY') else 'MISSING'}")
+        log.warning(f"[LIVE] POLYMARKET_API_KEY={'SET' if os.getenv('POLYMARKET_API_KEY') else 'MISSING'}")
+        log.warning(f"[LIVE] POLYMARKET_API_SECRET={'SET' if os.getenv('POLYMARKET_API_SECRET') else 'MISSING'}")
+        log.warning(f"[LIVE] POLYMARKET_PASSPHRASE={'SET' if os.getenv('POLYMARKET_PASSPHRASE') else 'MISSING'}")
 
         ok, missing = validate_live_credentials()
         if not ok:
@@ -56,7 +70,8 @@ class LiveTrader:
         try:
             from utils.polymarket_auth import get_clob_client
             self._clob_client = get_clob_client(authenticated=True)
-            log.info("[LIVE] CLOB client initialized successfully")
+            log.warning("[LIVE] CLOB client initialized successfully")
+            log.warning("[LIVE] ===== READY FOR LIVE ORDERS =====")
             return True
         except ImportError:
             self._init_error = "py-clob-client not installed"

@@ -44,7 +44,7 @@ def get_clob_client(authenticated: bool = False):
         log.info("Creating unauthenticated CLOB client (market data only)")
         return ClobClient(CLOB_HOST)
 
-    # Authenticated client for trading (Phase 4)
+    # Authenticated client for trading
     private_key = os.getenv("POLYMARKET_PRIVATE_KEY")
     if not private_key:
         log.error("POLYMARKET_PRIVATE_KEY not set — cannot create authenticated client")
@@ -54,42 +54,84 @@ def get_clob_client(authenticated: bool = False):
         )
 
     funder = os.getenv("POLYMARKET_FUNDER")
-    sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))  # 0=EOA
+    sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))
 
-    log.info("Creating authenticated CLOB client")
-    # Never log the private key
-    kwargs = dict(host=CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
-    if funder:
-        kwargs["funder"] = funder
-        kwargs["signature_type"] = sig_type
-        log.info(f"Using funder address: {funder[:10]}...{funder[-6:]}")
-
-    client = ClobClient(**kwargs)
-
-    # Derive or load API credentials (L2 auth)
+    # --- Build API creds if available ---
     api_key = os.getenv("POLYMARKET_API_KEY")
     api_secret = os.getenv("POLYMARKET_API_SECRET")
     api_passphrase = os.getenv("POLYMARKET_PASSPHRASE")
+    have_api_creds = bool(api_key and api_secret and api_passphrase)
 
-    if api_key and api_secret and api_passphrase:
+    creds = None
+    if have_api_creds:
         from py_clob_client.clob_types import ApiCreds
-        client.set_api_creds(ApiCreds(
+        creds = ApiCreds(
             api_key=api_key,
             api_secret=api_secret,
             api_passphrase=api_passphrase,
-        ))
-        log.info("Loaded API credentials from environment")
+        )
+
+    # --- Construct ClobClient with ALL parameters in one call ---
+    # This ensures the client is in the correct mode (L2 if creds provided)
+    # from the very first moment, and the OrderBuilder gets the right
+    # signature_type and funder from the start.
+    kwargs = dict(
+        host=CLOB_HOST,
+        key=private_key,
+        chain_id=CHAIN_ID,
+        signature_type=sig_type,
+    )
+    if funder:
+        kwargs["funder"] = funder
+    if creds:
+        kwargs["creds"] = creds
+
+    # --- Startup logging (never log secrets) ---
+    log.info(f"Creating authenticated CLOB client: "
+             f"chain_id={CHAIN_ID}, signature_type={sig_type}")
+    if funder:
+        log.info(f"  funder={funder[:10]}...{funder[-6:]}")
     else:
+        log.info("  funder=None (using signer address as maker)")
+    log.info(f"  api_creds={'FROM_ENV' if have_api_creds else 'WILL_DERIVE'}")
+
+    client = ClobClient(**kwargs)
+
+    # If no API creds from env, derive them
+    if not have_api_creds:
         log.info("Deriving API credentials from private key...")
         try:
-            creds = client.create_or_derive_api_creds()
-            client.set_api_creds(creds)
+            derived_creds = client.create_or_derive_api_creds()
+            client.set_api_creds(derived_creds)
             log.info("API credentials derived successfully")
         except Exception as e:
             log.error(f"Failed to derive API credentials: {e}")
             raise
 
+    # --- Post-init verification logging ---
+    _log_client_state(client)
+
     return client
+
+
+def _log_client_state(client):
+    """Log the resolved client state for debugging auth issues."""
+    try:
+        mode = getattr(client, 'mode', 'unknown')
+        signer = getattr(client, 'signer', None)
+        signer_addr = signer.address() if signer and hasattr(signer, 'address') else 'unknown'
+        builder = getattr(client, 'order_builder', None)
+        builder_funder = getattr(builder, 'funder', 'unknown') if builder else 'unknown'
+        builder_sig_type = getattr(builder, 'sig_type', 'unknown') if builder else 'unknown'
+        has_creds = getattr(client, 'creds', None) is not None
+
+        log.info(f"  client_mode={mode} (0=L0, 1=L1, 2=L2)")
+        log.info(f"  signer_address={str(signer_addr)[:10]}...{str(signer_addr)[-6:]}")
+        log.info(f"  builder_funder={str(builder_funder)[:10]}...{str(builder_funder)[-6:]}")
+        log.info(f"  builder_sig_type={builder_sig_type}")
+        log.info(f"  creds_attached={has_creds}")
+    except Exception as e:
+        log.warning(f"  client state logging failed: {e}")
 
 
 def validate_live_credentials() -> tuple[bool, list[str]]:

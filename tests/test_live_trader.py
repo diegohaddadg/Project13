@@ -397,6 +397,117 @@ class TestCredentialValidation(unittest.TestCase):
         self.assertEqual(missing, [])
 
 
+class TestProxyWalletInitialization(unittest.TestCase):
+    """Test proxy wallet (signature_type=2) client wiring."""
+
+    @patch.dict("os.environ", {
+        "POLYMARKET_PRIVATE_KEY": "0x" + "ab" * 32,
+        "POLYMARKET_FUNDER": "0x9EF3e154C5ec04e712f412bf0F491a6DAe5564F2",
+        "POLYMARKET_SIGNATURE_TYPE": "2",
+        "POLYMARKET_API_KEY": "test_key",
+        "POLYMARKET_API_SECRET": "test_secret",
+        "POLYMARKET_PASSPHRASE": "test_pass",
+    }, clear=True)
+    def test_get_clob_client_proxy_wallet_params(self):
+        """Verify ClobClient is constructed with correct proxy wallet args."""
+        import sys
+        mock_clob_client_mod = MagicMock()
+        mock_clob_types = MagicMock()
+        mock_clob_types.ApiCreds = _MockApiCreds
+
+        with patch.dict(sys.modules, {
+            "py_clob_client": MagicMock(),
+            "py_clob_client.client": mock_clob_client_mod,
+            "py_clob_client.clob_types": mock_clob_types,
+        }):
+            MockClobClient = MagicMock()
+            mock_clob_client_mod.ClobClient = MockClobClient
+
+            # Re-import to pick up mocked modules
+            import importlib
+            import utils.polymarket_auth as pa
+            importlib.reload(pa)
+
+            pa.get_clob_client(authenticated=True)
+
+            # Verify constructor was called with correct kwargs
+            MockClobClient.assert_called_once()
+            call_kwargs = MockClobClient.call_args[1]
+
+            self.assertEqual(call_kwargs["host"], "https://clob.polymarket.com")
+            self.assertEqual(call_kwargs["chain_id"], 137)
+            self.assertEqual(call_kwargs["signature_type"], 2)
+            self.assertEqual(call_kwargs["funder"], "0x9EF3e154C5ec04e712f412bf0F491a6DAe5564F2")
+            self.assertIn("key", call_kwargs)
+
+            # API creds should be passed in constructor, not via set_api_creds
+            self.assertIn("creds", call_kwargs)
+            creds = call_kwargs["creds"]
+            self.assertEqual(creds.api_key, "test_key")
+            self.assertEqual(creds.api_secret, "test_secret")
+            self.assertEqual(creds.api_passphrase, "test_pass")
+
+    @patch.dict("os.environ", {
+        "POLYMARKET_PRIVATE_KEY": "0x" + "ab" * 32,
+        "POLYMARKET_SIGNATURE_TYPE": "0",
+    }, clear=True)
+    def test_eoa_no_funder_no_creds_in_constructor(self):
+        """EOA wallet without env creds should derive creds after construction."""
+        import sys
+        mock_clob_client_mod = MagicMock()
+        mock_clob_types = MagicMock()
+
+        with patch.dict(sys.modules, {
+            "py_clob_client": MagicMock(),
+            "py_clob_client.client": mock_clob_client_mod,
+            "py_clob_client.clob_types": mock_clob_types,
+        }):
+            MockClobClient = MagicMock()
+            mock_instance = MagicMock()
+            MockClobClient.return_value = mock_instance
+            mock_clob_client_mod.ClobClient = MockClobClient
+
+            import importlib
+            import utils.polymarket_auth as pa
+            importlib.reload(pa)
+
+            pa.get_clob_client(authenticated=True)
+
+            call_kwargs = MockClobClient.call_args[1]
+            self.assertEqual(call_kwargs["signature_type"], 0)
+            self.assertNotIn("funder", call_kwargs)
+            self.assertNotIn("creds", call_kwargs)
+
+            # Should have called derive
+            mock_instance.create_or_derive_api_creds.assert_called_once()
+            mock_instance.set_api_creds.assert_called_once()
+
+    @patch.dict("os.environ", {
+        "POLYMARKET_PRIVATE_KEY": "0x" + "ab" * 32,
+        "POLYMARKET_FUNDER": "0xFunderAddr123",
+        "POLYMARKET_SIGNATURE_TYPE": "2",
+        "POLYMARKET_API_KEY": "k",
+        "POLYMARKET_API_SECRET": "s",
+        "POLYMARKET_PASSPHRASE": "p",
+    }, clear=True)
+    def test_validate_credentials_proxy_wallet(self):
+        """All proxy wallet creds present should validate."""
+        import importlib
+        import utils.polymarket_auth as pa
+        importlib.reload(pa)
+        ok, missing = pa.validate_live_credentials()
+        self.assertTrue(ok)
+        self.assertEqual(missing, [])
+
+
+class _MockApiCreds:
+    """Stand-in for py_clob_client.clob_types.ApiCreds."""
+    def __init__(self, api_key="", api_secret="", api_passphrase=""):
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.api_passphrase = api_passphrase
+
+
 class TestPaperModeUnchanged(unittest.TestCase):
     """Verify paper mode is completely unaffected."""
 
