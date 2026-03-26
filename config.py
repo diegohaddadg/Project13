@@ -1,13 +1,30 @@
 """Central configuration for Project13."""
 
 import os
+import sys
 from dotenv import load_dotenv
 
-# Load .env BEFORE any os.getenv() calls below.
-# config.py is evaluated at import time — if load_dotenv() runs later
-# (e.g. in main.py:run()), the env vars won't exist yet and defaults
-# will be baked in permanently.
-load_dotenv()
+# Detect pytest: when running under pytest, skip .env loading so tests
+# use hardcoded defaults and are not poisoned by the production .env.
+_RUNNING_UNDER_PYTEST = "_pytest" in sys.modules
+
+if not _RUNNING_UNDER_PYTEST:
+    # Load .env BEFORE any os.getenv() calls below.
+    # config.py is evaluated at import time — if load_dotenv() runs later
+    # (e.g. in main.py:run()), the env vars won't exist yet and defaults
+    # will be baked in permanently.
+    load_dotenv()
+
+
+def _env(key: str, default: str) -> str:
+    """Read env var, but always return the default when running under pytest.
+
+    This prevents production env vars (from .env or shell exports on the
+    droplet) from leaking into test runs and breaking paper-mode assumptions.
+    """
+    if _RUNNING_UNDER_PYTEST:
+        return default
+    return os.getenv(key, default)
 
 # --- WebSocket URLs ---
 # Binance WebSocket URL — configurable via .env for VPS compatibility:
@@ -148,9 +165,9 @@ SIZE_TIER_MEDIUM = 0.07
 SIZE_TIER_LOW = 0.05
 
 # --- Execution ---
-TRADING_ENABLED = os.getenv("TRADING_ENABLED", "true").lower() == "true"
-EXECUTION_MODE = os.getenv("EXECUTION_MODE", "paper")
-LIVE_TRADING_CONFIRMATION = os.getenv("LIVE_TRADING_CONFIRMATION", "")
+TRADING_ENABLED = _env("TRADING_ENABLED", "true").lower() == "true"
+EXECUTION_MODE = _env("EXECUTION_MODE", "paper")
+LIVE_TRADING_CONFIRMATION = _env("LIVE_TRADING_CONFIRMATION", "")
 # Dynamic order sizing — scales with current total equity
 MAX_ORDER_SIZE_PCT = 0.08              # max single order = 8% of current total equity
 MAX_ORDER_SIZE_FLOOR_USDC = 5.0        # minimum order size (prevents dust orders)
@@ -164,7 +181,7 @@ EXECUTION_DEDUP_SECONDS = 15   # suppress repeated execution of same signal
 PAPER_SIMULATED_LATENCY_MS = 200
 PAPER_SLIPPAGE_PCT = 0.01
 # Paper baseline for accounting validation (delete trade log when changing this)
-STARTING_CAPITAL_USDC = float(os.getenv("STARTING_CAPITAL_USDC", "100.0"))
+STARTING_CAPITAL_USDC = float(_env("STARTING_CAPITAL_USDC", "100.0"))
 RESOLUTION_POLL_INTERVAL_SECONDS = 5
 TRADE_LOG_PATH = "logs/trade_log.jsonl"
 
@@ -178,10 +195,10 @@ LIVE_REDEEM_MAX_RETRIES = 5
 # --- Risk Engine (Phase 5) ---
 
 # Drawdown protection (fraction of high-water mark equity)
-MAX_DRAWDOWN_PCT = float(os.getenv("MAX_DRAWDOWN_PCT", "0.30"))
+MAX_DRAWDOWN_PCT = float(_env("MAX_DRAWDOWN_PCT", "0.30"))
 
 # Daily loss halt: fraction of current total equity (scales with portfolio)
-DAILY_LOSS_LIMIT_PCT = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.25"))
+DAILY_LOSS_LIMIT_PCT = float(_env("DAILY_LOSS_LIMIT_PCT", "0.25"))
 DAILY_LOSS_RESET_HOUR_UTC = 0
 
 # Paper risk mode: warn but continue trading (data collection); live: hard block
@@ -244,7 +261,7 @@ FRAGILE_CERTAINTY_MAX_MARKET_PROB = 0.60  # market prob ceiling for fragile cert
 FRAGILE_CERTAINTY_SIZE_MULTIPLIER = 0.5   # multiply recommended size by this
 
 # Kill switch
-KILL_SWITCH_ACTIVE = os.getenv("KILL_SWITCH_ACTIVE", "false").lower() == "true"
+KILL_SWITCH_ACTIVE = _env("KILL_SWITCH_ACTIVE", "false").lower() == "true"
 KILL_SWITCH_FEED_TIMEOUT = 30   # seconds without feed data
 
 # Reserved for future use — not yet wired into runtime

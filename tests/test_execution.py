@@ -210,7 +210,7 @@ class TestLiveTrader(unittest.TestCase):
     def test_rejects_when_mode_not_live(self):
         lt = LiveTrader()
         order = Order(direction="UP", size_usdc=10, token_id="abc")
-        # config.EXECUTION_MODE defaults to "paper"
+        # config.EXECUTION_MODE defaults to "paper" (dotenv skipped under pytest)
         result = lt.execute(order)
         self.assertEqual(result.status, "REJECTED")
         self.assertIn("not 'live'", result.metadata.get("rejection_reason", ""))
