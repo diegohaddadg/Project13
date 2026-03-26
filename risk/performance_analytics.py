@@ -24,6 +24,15 @@ class PerformanceAnalytics:
         self._high_water_mark: float = config.STARTING_CAPITAL_USDC
         self._max_drawdown_observed: float = 0.0
 
+    def reset_hwm(self, equity: float) -> None:
+        """Reset high-water mark to current equity at session start.
+
+        Called after trade log restore so the HWM reflects actual starting
+        equity, not stale STARTING_CAPITAL that may be unreachable.
+        """
+        self._high_water_mark = equity
+        self._max_drawdown_observed = 0.0
+
     def update(self, closed_position: Position) -> None:
         """Record a newly closed position."""
         self._closed_positions.append(closed_position)

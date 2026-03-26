@@ -393,7 +393,12 @@ async def run():
     analytics = PerformanceAnalytics()
     hm = HealthMonitor(agg)
     rm = RiskManager(pm, ks, exp, analytics, hm)
-    rm.set_session_start_equity(pm.get_total_equity())
+    session_equity = pm.get_total_equity()
+    rm.set_session_start_equity(session_equity)
+    # Reset HWM to actual starting equity so drawdown is measured from HERE,
+    # not from stale STARTING_CAPITAL_USDC which may be unreachable after losses.
+    analytics.reset_hwm(session_equity)
+    log.info(f"Session HWM reset to ${session_equity:.2f} (matches restored equity)")
 
     log.info(f"Signal engine — strategies: {engine.get_active_strategies()}")
 

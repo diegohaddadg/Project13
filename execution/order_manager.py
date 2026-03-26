@@ -72,7 +72,6 @@ class OrderManager:
                 position_manager=self._pm,
                 order_manager=self,
             )
-            # Wire reconciler into live trader for entry cap gating
             self._live_trader.set_reconciler(self._live_reconciler)
             log.warning("[LIVE] Reconciler initialized — running startup sync")
             self._live_reconciler.startup_sync()

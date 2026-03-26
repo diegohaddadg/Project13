@@ -62,10 +62,13 @@ class LiveReconciler:
         self._stale: bool = True  # True until first successful reconciliation
 
         # Redemption tracking
-        self._pending_redemptions: dict[str, dict] = {}  # position_id -> info
         self._redeemed_count: int = 0
         self._redeem_failures: int = 0
         self._redeem_cooldowns: dict[str, float] = {}  # position_id -> next_retry_ts
+
+        # On-chain redeemer (initialized lazily on first redemption attempt)
+        self._onchain_redeemer = None
+        self._onchain_redeemer_init_attempted: bool = False
 
     # ------------------------------------------------------------------
     # Main reconciliation entry point
@@ -396,29 +399,78 @@ class LiveReconciler:
             self._schedule_retry(pos)
             log.error(f"[RECON] REDEEM FAILED: {pos.position_id} — {e}")
 
-    def _execute_redemption(self, condition_id: str, pos: Position) -> bool:
-        """Execute the actual redemption call.
+    def _ensure_onchain_redeemer(self) -> bool:
+        """Lazily initialize the on-chain redeemer on first redemption attempt."""
+        if self._onchain_redeemer is not None:
+            return self._onchain_redeemer.is_ready
+        if self._onchain_redeemer_init_attempted:
+            return False  # Already tried and failed
 
-        Tries py-clob-client methods first. If those don't exist or fail,
-        logs the situation clearly and returns False.
+        self._onchain_redeemer_init_attempted = True
+        try:
+            from execution.onchain_redeemer import OnchainRedeemer
+            self._onchain_redeemer = OnchainRedeemer()
+            if self._onchain_redeemer.initialize():
+                return True
+            else:
+                log.warning("[RECON] On-chain redeemer init failed — will use fallback methods")
+                return False
+        except ImportError as e:
+            log.warning(f"[RECON] On-chain redeemer unavailable (web3 not installed): {e}")
+            return False
+        except Exception as e:
+            log.warning(f"[RECON] On-chain redeemer init error: {e}")
+            return False
+
+    def _execute_redemption(self, condition_id: str, pos: Position) -> bool:
+        """Execute redemption — tries on-chain first, then py-clob-client fallbacks.
+
+        Returns True only if redemption is confirmed successful.
         """
-        # Attempt 1: Try the CLOB client's redeem method (if it exists in newer versions)
+        # Attempt 1: On-chain NegRiskAdapter redemption (the correct path)
+        if self._ensure_onchain_redeemer():
+            try:
+                result = self._onchain_redeemer.redeem(condition_id, neg_risk=True)
+                if result["success"]:
+                    pos.metadata["redeem_tx_hash"] = result["tx_hash"]
+                    pos.metadata["redeem_gas_used"] = result.get("gas_used")
+                    log.warning(
+                        f"[RECON] REDEEM TX CONFIRMED: tx={result['tx_hash']} "
+                        f"gas={result.get('gas_used', '?')}"
+                    )
+                    return True
+                else:
+                    log.warning(f"[RECON] NegRisk redeem failed: {result['error']}")
+                    # If NegRisk failed, try CTF direct as fallback
+                    result2 = self._onchain_redeemer.redeem(condition_id, neg_risk=False)
+                    if result2["success"]:
+                        pos.metadata["redeem_tx_hash"] = result2["tx_hash"]
+                        pos.metadata["redeem_gas_used"] = result2.get("gas_used")
+                        log.warning(
+                            f"[RECON] REDEEM TX CONFIRMED (CTF fallback): tx={result2['tx_hash']}"
+                        )
+                        return True
+                    else:
+                        log.warning(f"[RECON] CTF fallback also failed: {result2['error']}")
+            except Exception as e:
+                log.warning(f"[RECON] On-chain redeem exception: {e}")
+
+        # Attempt 2: py-clob-client redeem method (if it exists)
         if hasattr(self._client, 'redeem'):
             try:
                 resp = self._client.redeem(condition_id=condition_id)
                 if resp:
-                    log.info(f"[RECON] Redemption via client.redeem() succeeded: {_truncate_dict(resp)}")
+                    log.info(f"[RECON] Redemption via client.redeem() succeeded")
                     return True
             except Exception as e:
                 log.warning(f"[RECON] client.redeem() failed: {e}")
 
-        # Attempt 2: Try merge_positions (some client versions)
+        # Attempt 3: py-clob-client merge_positions
         if hasattr(self._client, 'merge_positions'):
             try:
                 token_id = pos.metadata.get("token_id", "")
                 resp = self._client.merge_positions(
-                    condition_id=condition_id,
-                    token_id=token_id,
+                    condition_id=condition_id, token_id=token_id,
                 )
                 if resp:
                     log.info(f"[RECON] Redemption via merge_positions() succeeded")
@@ -426,23 +478,9 @@ class LiveReconciler:
             except Exception as e:
                 log.warning(f"[RECON] merge_positions() failed: {e}")
 
-        # Attempt 3: Direct CLOB API call to redeem endpoint
-        try:
-            # POST /redeem with condition_id
-            if hasattr(self._client, '_post'):
-                resp = self._client._post(
-                    f"{self._client.host}/redeem",
-                    json={"conditionId": condition_id}
-                )
-                if resp and isinstance(resp, dict) and resp.get("success"):
-                    log.info(f"[RECON] Redemption via /redeem endpoint succeeded")
-                    return True
-        except Exception as e:
-            log.warning(f"[RECON] /redeem endpoint failed: {e}")
-
         log.warning(
             f"[RECON] All redemption methods failed for {condition_id[:16]}. "
-            f"Manual redemption may be required via Polymarket UI."
+            f"Position will be marked CLAIMABLE."
         )
         return False
 

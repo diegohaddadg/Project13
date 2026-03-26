@@ -46,6 +46,7 @@ class RiskManager:
         # State tracking
         self._consecutive_losses: int = 0
         self._cooldown_until: float = 0.0
+        self._drawdown_cooldown_until: float = 0.0  # separate cooldown for drawdown
         self._daily_pnl: float = 0.0
         self._daily_reset_date: str = ""
         self._risk_rejections: int = 0
@@ -108,7 +109,7 @@ class RiskManager:
         pw = self._paper_warn_only()
 
         self._ks.check_triggers(
-            drawdown_breached=drawdown >= config.MAX_DRAWDOWN_PCT and not pw,
+            drawdown_breached=False,  # drawdown now uses cooldown, not kill switch
             daily_limit_hit=(self._daily_pnl <= -daily_loss_cap_usd) and not pw,
             feeds_healthy=health["any_feed_ok"],
             polymarket_healthy=True,
@@ -117,13 +118,48 @@ class RiskManager:
         if self._ks.is_active():
             return self._reject(f"Kill switch just triggered: {self._ks.trigger_reason}")
 
-        # B. Max drawdown
+        # B. Max drawdown — cooldown-based (not permanent kill switch)
+        now = time.time()
         if drawdown >= config.MAX_DRAWDOWN_PCT:
             if pw:
                 log.warning(f"[PAPER WARN] Drawdown {drawdown:.1%} exceeds max {config.MAX_DRAWDOWN_PCT:.1%} — continuing for data collection")
             else:
+                if self._drawdown_cooldown_until == 0.0:
+                    # First breach — start cooldown
+                    self._drawdown_cooldown_until = now + config.DRAWDOWN_COOLDOWN_SECONDS
+                    log.warning(
+                        f"[RISK] Drawdown {drawdown:.1%} exceeds max {config.MAX_DRAWDOWN_PCT:.1%} "
+                        f"— entering {config.DRAWDOWN_COOLDOWN_SECONDS:.0f}s cooldown"
+                    )
+                remaining = self._drawdown_cooldown_until - now
+                if remaining > 0:
+                    return self._reject(
+                        f"Drawdown cooldown: {drawdown:.1%} exceeds max {config.MAX_DRAWDOWN_PCT:.1%} "
+                        f"({remaining:.0f}s remaining)"
+                    )
+                else:
+                    # Cooldown expired but still in drawdown — reset cooldown for another cycle
+                    log.warning(
+                        f"[RISK] Drawdown cooldown expired but still at {drawdown:.1%} "
+                        f"— restarting {config.DRAWDOWN_COOLDOWN_SECONDS:.0f}s cooldown"
+                    )
+                    self._drawdown_cooldown_until = now + config.DRAWDOWN_COOLDOWN_SECONDS
+                    return self._reject(
+                        f"Drawdown cooldown restarted: {drawdown:.1%} still exceeds max {config.MAX_DRAWDOWN_PCT:.1%}"
+                    )
+        elif self._drawdown_cooldown_until > 0.0:
+            # Was in drawdown cooldown but drawdown has recovered
+            if now >= self._drawdown_cooldown_until:
+                log.warning(
+                    f"[RISK] Drawdown recovered to {drawdown:.1%} after cooldown — resuming trading"
+                )
+                self._drawdown_cooldown_until = 0.0
+            else:
+                # Still in cooldown window even though drawdown recovered
+                remaining = self._drawdown_cooldown_until - now
                 return self._reject(
-                    f"Drawdown {drawdown:.1%} exceeds max {config.MAX_DRAWDOWN_PCT:.1%}"
+                    f"Drawdown cooldown active ({remaining:.0f}s remaining), "
+                    f"current drawdown {drawdown:.1%}"
                 )
 
         # C. Daily loss limit
@@ -277,6 +313,8 @@ class RiskManager:
         dd_headroom_pct = max(0.0, dd_limit - drawdown)
         exp_headroom_pct = max(0.0, exp_limit - exposure_pct)
 
+        dd_cooldown_remaining = max(0, self._drawdown_cooldown_until - time.time())
+
         blockers: list[str] = []
         if self._ks.is_active():
             blockers.append(f"Kill switch: {self._ks.trigger_reason or 'active'}")
@@ -284,7 +322,9 @@ class RiskManager:
             blockers.append(
                 f"Daily loss limit reached ({daily_loss_pct:.0%} of equity ≈ ${daily_limit_usd:.2f})"
             )
-        if drawdown >= dd_limit:
+        if dd_cooldown_remaining > 0:
+            blockers.append(f"Max drawdown cooldown (~{dd_cooldown_remaining:.0f}s remaining)")
+        elif drawdown >= dd_limit:
             blockers.append("Max drawdown")
         if cooldown_remaining > 0:
             blockers.append(
@@ -307,6 +347,7 @@ class RiskManager:
             "consecutive_losses": self._consecutive_losses,
             "max_consecutive": config.MAX_CONSECUTIVE_LOSSES,
             "cooldown_remaining_s": cooldown_remaining,
+            "drawdown_cooldown_remaining_s": dd_cooldown_remaining,
             "exposure_pct": exposure_pct,
             "exposure_limit": exp_limit,
             "risk_rejections": self._risk_rejections,

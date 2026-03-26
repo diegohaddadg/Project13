@@ -35,13 +35,13 @@ class LiveTrader:
 
     def __init__(self):
         self._clob_client = None
-        self._reconciler = None  # Set via set_reconciler() after init
+        self._reconciler = None  # optional, for recon freshness check only
         self._init_error: Optional[str] = None
         self._orders_submitted: int = 0
         self._orders_failed: int = 0
 
     def set_reconciler(self, reconciler) -> None:
-        """Attach the live reconciler for exchange-truth entry gating."""
+        """Attach reconciler reference for freshness checks (not entry gating)."""
         self._reconciler = reconciler
 
     def initialize(self) -> bool:
@@ -156,77 +156,55 @@ class LiveTrader:
                 f"CLOB client not initialized: {self._init_error or 'call initialize() first'}"
             )
 
-        # --- HARD LIVE ENTRY CAP (exchange-truth gating) ---
-        cap_rejection = self._check_live_entry_cap(order)
-        if cap_rejection:
-            return self._reject(order, cap_rejection)
+        # Entry caps are enforced by order_manager._validate() using the same
+        # MAX_ENTRIES_PER_WINDOW and MAX_CONCURRENT_POSITIONS as paper mode.
+        # This matches original v2 strategy behavior.
+
+        # Safety gate 12: reconciliation freshness (soft, live-only)
+        # Does NOT change entry logic — only blocks if exchange sync is badly
+        # stale or broken, to avoid blind submissions.
+        recon_block = self._check_recon_freshness()
+        if recon_block:
+            return self._reject(order, recon_block)
 
         # --- All gates passed — submit to CLOB ---
         return self._submit_clob_order(order)
 
-    def _check_live_entry_cap(self, order: Order) -> Optional[str]:
-        """Hard live entry cap using exchange-truth state.
+    def _check_recon_freshness(self) -> Optional[str]:
+        """Soft reconciliation freshness check. Returns rejection reason or None.
 
-        Returns rejection reason string, or None if entry is allowed.
-        Fail-closed: if reconciliation is unavailable or stale, block entry.
-
-        Same-direction adds are allowed within the cap (no duplicate-direction block).
+        <= 10s: allow silently
+        10-30s: allow with warning
+        > 30s: block
+        never synced: block
+        no reconciler: allow (reconciler may not be configured)
         """
-        # Gate A: reconciler must exist and not be stale
         if self._reconciler is None:
-            return (
-                "BLOCKED: no live reconciler — cannot verify market exposure. "
-                "Refusing new live entry."
-            )
+            # No reconciler attached — don't block (may be disabled by config)
+            return None
 
         if self._reconciler._stale:
-            return (
-                "BLOCKED: reconciliation stale (no successful sync yet). "
-                "Refusing new live entry until exchange state is confirmed."
-            )
-
-        # Check reconciliation freshness (stale if > 30s since last sync)
-        recon_age = time.time() - self._reconciler._last_reconcile_ts
-        if self._reconciler._last_reconcile_ts > 0 and recon_age > 30.0:
-            return (
-                f"BLOCKED: reconciliation data is {recon_age:.0f}s old (>30s). "
-                f"Refusing new live entry until fresh sync."
-            )
-
-        # Gate B: get exposure for this market
-        exposure = self._reconciler.get_live_market_exposure(order.market_id)
-
-        total = exposure["total_entries"]
-        cap = config.LIVE_MAX_ENTRIES_PER_WINDOW
-
-        # Gate C: hard cap on entries per market window
-        if total >= cap:
             log.warning(
-                f"[LIVE] BLOCKED: market entry cap reached for {order.market_id} "
-                f"({total}/{cap}: {exposure['pending_orders']} pending + "
-                f"{exposure['open_positions']} filled)"
+                "[LIVE] RECON BLOCK: refusing live entry because no successful "
+                "reconciliation has occurred yet"
             )
             return (
-                f"BLOCKED: market entry cap reached ({total}/{cap} entries: "
-                f"{exposure['pending_orders']} pending + {exposure['open_positions']} filled)"
+                "RECON BLOCK: no successful reconciliation yet — "
+                "refusing live entry until exchange sync completes"
             )
 
-        # Same-direction adds allowed within cap — log for visibility
-        if order.direction in exposure["active_directions"]:
-            log.info(
-                f"[LIVE] ALLOWED: same-direction add {order.direction} within cap "
-                f"for {order.market_id} ({total}/{cap} entries, "
-                f"UP={exposure['up_count']} DOWN={exposure['down_count']})"
-            )
+        age = time.time() - self._reconciler._last_reconcile_ts
 
-        # All caps passed — log exposure state for audit trail
-        log.info(
-            f"[LIVE] Entry cap check PASSED: {order.market_id} "
-            f"entries={total}/{cap} direction={order.direction} "
-            f"pending={exposure['pending_orders']} filled={exposure['open_positions']} "
-            f"capital=${exposure['total_capital']:.2f}"
-        )
-        return None
+        if age <= 10.0:
+            return None  # fresh — allow silently
+
+        if age <= 30.0:
+            log.warning(f"[LIVE] RECON STALE-WARN: allowing entry but recon age is {age:.0f}s")
+            return None  # stale-ish but allow
+
+        # > 30s — block
+        log.warning(f"[LIVE] RECON BLOCK: refusing live entry because recon age is {age:.0f}s")
+        return f"RECON BLOCK: reconciliation age is {age:.0f}s (>30s) — refusing live entry"
 
     def _submit_clob_order(self, order: Order) -> Order:
         """Build and submit a limit order to Polymarket CLOB."""

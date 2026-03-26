@@ -191,13 +191,12 @@ LIVE_AUTO_REDEEM_ENABLED = os.getenv("LIVE_AUTO_REDEEM_ENABLED", "true").lower()
 LIVE_RECONCILE_INTERVAL_SECONDS = float(os.getenv("LIVE_RECONCILE_INTERVAL_SECONDS", "5.0"))
 LIVE_REDEEM_RETRY_BACKOFF_SECONDS = 30.0
 LIVE_REDEEM_MAX_RETRIES = 5
-# Hard cap for live mode entries per market window (separate from paper MAX_ENTRIES_PER_WINDOW)
-LIVE_MAX_ENTRIES_PER_WINDOW = int(os.getenv("LIVE_MAX_ENTRIES_PER_WINDOW", "2"))
 
 # --- Risk Engine (Phase 5) ---
 
 # Drawdown protection (fraction of high-water mark equity)
 MAX_DRAWDOWN_PCT = float(_env("MAX_DRAWDOWN_PCT", "0.30"))
+DRAWDOWN_COOLDOWN_SECONDS = float(os.getenv("DRAWDOWN_COOLDOWN_SECONDS", "300"))  # 5 minutes
 
 # Daily loss halt: fraction of current total equity (scales with portfolio)
 DAILY_LOSS_LIMIT_PCT = float(_env("DAILY_LOSS_LIMIT_PCT", "0.25"))
