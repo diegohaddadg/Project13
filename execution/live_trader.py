@@ -134,7 +134,12 @@ class LiveTrader:
         if order.num_shares <= 0:
             return self._reject(order, f"num_shares {order.num_shares} must be positive")
 
-        # Safety gate 10: CLOB client ready
+        # Safety gate 10: token_id format validation for live CLOB
+        token_valid, token_reason = _validate_clob_token_id(order.token_id)
+        if not token_valid:
+            return self._reject(order, f"Invalid CLOB token_id: {token_reason} (got: {order.token_id!r})")
+
+        # Safety gate 11: CLOB client ready
         if not self.is_ready:
             return self._fail(
                 order,
@@ -151,16 +156,22 @@ class LiveTrader:
         # Round shares to 2 decimal places
         size = round(order.num_shares, 2)
 
+        # --- Full diagnostic dump before submit ---
         log.warning(
             f"[LIVE] SUBMITTING: {order.direction} {order.market_type} "
-            f"${order.size_usdc:.2f} | {size} shares @{price:.3f} "
-            f"token={order.token_id[:20]}..."
+            f"${order.size_usdc:.2f} | {size} shares @{price:.3f}"
         )
+        log.warning(f"[LIVE]   market_id={order.market_id}")
+        log.warning(f"[LIVE]   condition_id={order.metadata.get('condition_id', 'MISSING')}")
+        log.warning(f"[LIVE]   direction={order.direction} side={order.side}")
+        log.warning(f"[LIVE]   token_id={order.token_id}")
+        log.warning(f"[LIVE]   token_id_len={len(order.token_id)} token_id_source=MarketState.{'up' if order.direction == 'UP' else 'down'}_token_id")
 
         order.status = "SUBMITTED"
         order.metadata["live_submit_ts"] = time.time()
         order.metadata["live_price_sent"] = price
         order.metadata["live_size_sent"] = size
+        order.metadata["live_token_id"] = order.token_id
 
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType
@@ -278,6 +289,32 @@ class LiveTrader:
         order.metadata["failure_reason"] = reason
         log.error(f"[LIVE] FAILED: {reason} | {order.summary()}")
         return order
+
+
+def _validate_clob_token_id(token_id: str) -> tuple[bool, str]:
+    """Validate that a token_id looks like a real Polymarket CLOB conditional token.
+
+    Valid CLOB token IDs are long numeric strings (typically 70-78 digits),
+    representing uint256 values. They are NOT hex addresses, short slugs,
+    or placeholder strings.
+
+    Returns:
+        (is_valid, reason_if_invalid)
+    """
+    if not token_id:
+        return (False, "empty")
+    if not isinstance(token_id, str):
+        return (False, f"not a string: {type(token_id).__name__}")
+    stripped = token_id.strip()
+    if not stripped:
+        return (False, "whitespace only")
+    # Must be all digits (uint256 decimal representation)
+    if not stripped.isdigit():
+        return (False, f"not numeric — contains non-digit chars")
+    # Real CLOB token IDs are 70-78 digits (uint256 range)
+    if len(stripped) < 30:
+        return (False, f"too short ({len(stripped)} chars) — likely a test/placeholder value")
+    return (True, "")
 
 
 def _safe_serialize(obj) -> str:

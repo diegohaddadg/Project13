@@ -24,6 +24,10 @@ class _MockOrderArgs:
         self.side = side
 
 
+# Realistic CLOB token ID (uint256 decimal, ~75 digits)
+_REAL_CLOB_TOKEN = "21742633143463906290569050155826241533067272736897614950488156847949938836455"
+
+
 def _make_order(**overrides) -> Order:
     defaults = dict(
         order_id="test_001",
@@ -32,14 +36,14 @@ def _make_order(**overrides) -> Order:
         market_type="btc-5min",
         direction="UP",
         side="BUY",
-        token_id="0x" + "a" * 64,
+        token_id=_REAL_CLOB_TOKEN,
         price=0.50,
         size_usdc=25.0,
         num_shares=50.0,
         order_type="LIMIT",
         status="PENDING",
         execution_mode="live",
-        metadata={"strategy": "latency_arb"},
+        metadata={"strategy": "latency_arb", "condition_id": "0xcond123"},
     )
     defaults.update(overrides)
     return Order(**defaults)
@@ -519,6 +523,136 @@ class TestPaperModeUnchanged(unittest.TestCase):
         self.assertEqual(result.status, "FILLED")
         self.assertEqual(result.execution_mode, "paper")
         self.assertIsNotNone(result.fill_price)
+
+
+class TestTokenIdValidation(unittest.TestCase):
+    """Test CLOB token_id format validation."""
+
+    def test_valid_real_token(self):
+        from execution.live_trader import _validate_clob_token_id
+        ok, reason = _validate_clob_token_id(_REAL_CLOB_TOKEN)
+        self.assertTrue(ok)
+
+    def test_empty_token_rejected(self):
+        from execution.live_trader import _validate_clob_token_id
+        ok, reason = _validate_clob_token_id("")
+        self.assertFalse(ok)
+        self.assertIn("empty", reason)
+
+    def test_hex_token_rejected(self):
+        from execution.live_trader import _validate_clob_token_id
+        ok, reason = _validate_clob_token_id("0x" + "a" * 64)
+        self.assertFalse(ok)
+        self.assertIn("non-digit", reason)
+
+    def test_short_placeholder_rejected(self):
+        from execution.live_trader import _validate_clob_token_id
+        ok, reason = _validate_clob_token_id("token_up_123")
+        self.assertFalse(ok)
+        self.assertIn("non-digit", reason)
+
+    def test_short_numeric_rejected(self):
+        from execution.live_trader import _validate_clob_token_id
+        ok, reason = _validate_clob_token_id("12345")
+        self.assertFalse(ok)
+        self.assertIn("too short", reason)
+
+    def test_gamma_market_id_rejected(self):
+        """Gamma numeric market ID (short number) should not pass as a CLOB token."""
+        from execution.live_trader import _validate_clob_token_id
+        ok, reason = _validate_clob_token_id("502414")
+        self.assertFalse(ok)
+
+    @patch.object(config, "EXECUTION_MODE", "live")
+    @patch.object(config, "TRADING_ENABLED", True)
+    @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
+    def test_live_rejects_bad_token_before_submit(self):
+        """Live execute() should reject order with non-CLOB token_id."""
+        trader = LiveTrader()
+        trader._clob_client = MagicMock()  # client is ready
+        order = _make_order(token_id="token_up_123")  # bad token
+        result = trader.execute(order)
+        self.assertEqual(result.status, "REJECTED")
+        self.assertIn("Invalid CLOB token_id", result.metadata.get("rejection_reason", ""))
+
+    @patch.object(config, "EXECUTION_MODE", "live")
+    @patch.object(config, "TRADING_ENABLED", True)
+    @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
+    def test_live_accepts_valid_token(self):
+        """Live execute() should pass token validation with real CLOB token."""
+        trader = LiveTrader()
+        trader._clob_client = MagicMock()
+        order = _make_order(token_id=_REAL_CLOB_TOKEN)
+        # Will fail at CLOB submit (mocked), but should NOT fail at token validation
+        result = trader.execute(order)
+        reason = result.metadata.get("rejection_reason", "")
+        self.assertNotIn("Invalid CLOB token_id", reason)
+
+
+class TestTokenDirectionMapping(unittest.TestCase):
+    """Test that UP/DOWN directions map to correct token_id from MarketState."""
+
+    def test_up_direction_uses_up_token(self):
+        """direction=UP should use MarketState.up_token_id."""
+        from execution.order_manager import OrderManager
+        from execution.position_manager import PositionManager
+        from models.trade_signal import TradeSignal
+
+        pm = PositionManager()
+        om = OrderManager(pm)
+
+        up_tok = "11111111111111111111111111111111111111111111111111111111111111111111111111"
+        down_tok = "22222222222222222222222222222222222222222222222222222222222222222222222222"
+
+        sig = TradeSignal(
+            market_type="btc-5min", market_id="mkt_1", strategy="latency_arb",
+            direction="UP", model_probability=0.70, market_probability=0.50,
+            edge=0.20, net_ev=0.10, confidence="HIGH",
+            recommended_size_pct=0.10, strike_price=68000, spot_price=68200,
+            time_remaining=120,
+        )
+        snap = MarketState(
+            market_id="mkt_1", condition_id="0xcond", market_type="btc-5min",
+            strike_price=68000, yes_price=0.50, no_price=0.50, spread=0.02,
+            time_remaining_seconds=120, is_active=True,
+            up_token_id=up_tok, down_token_id=down_tok,
+        )
+
+        order = om._build_order(sig, snap)
+        self.assertIsNotNone(order)
+        self.assertEqual(order.token_id, up_tok)
+        self.assertEqual(order.direction, "UP")
+
+    def test_down_direction_uses_down_token(self):
+        """direction=DOWN should use MarketState.down_token_id."""
+        from execution.order_manager import OrderManager
+        from execution.position_manager import PositionManager
+        from models.trade_signal import TradeSignal
+
+        pm = PositionManager()
+        om = OrderManager(pm)
+
+        up_tok = "11111111111111111111111111111111111111111111111111111111111111111111111111"
+        down_tok = "22222222222222222222222222222222222222222222222222222222222222222222222222"
+
+        sig = TradeSignal(
+            market_type="btc-5min", market_id="mkt_1", strategy="latency_arb",
+            direction="DOWN", model_probability=0.70, market_probability=0.50,
+            edge=0.20, net_ev=0.10, confidence="HIGH",
+            recommended_size_pct=0.10, strike_price=68000, spot_price=67800,
+            time_remaining=120,
+        )
+        snap = MarketState(
+            market_id="mkt_1", condition_id="0xcond", market_type="btc-5min",
+            strike_price=68000, yes_price=0.50, no_price=0.50, spread=0.02,
+            time_remaining_seconds=120, is_active=True,
+            up_token_id=up_tok, down_token_id=down_tok,
+        )
+
+        order = om._build_order(sig, snap)
+        self.assertIsNotNone(order)
+        self.assertEqual(order.token_id, down_tok)
+        self.assertEqual(order.direction, "DOWN")
 
 
 if __name__ == "__main__":

@@ -461,12 +461,21 @@ class PolymarketFeed:
             end_date_str = data.get("endDate", "")
             event_start_str = data.get("eventStartTime", "")
 
-            clob_token_ids = _parse_json_field(data.get("clobTokenIds"))
+            raw_clob_field = data.get("clobTokenIds")
+            clob_token_ids = _parse_json_field(raw_clob_field)
             if len(clob_token_ids) < 2:
-                log.error(f"Market {slug} has < 2 clobTokenIds — skipping")
+                log.error(f"Market {slug} has < 2 clobTokenIds — skipping (raw={raw_clob_field!r})")
                 return None
-            up_token_id = clob_token_ids[0]
-            down_token_id = clob_token_ids[1]
+            up_token_id = str(clob_token_ids[0]).strip()
+            down_token_id = str(clob_token_ids[1]).strip()
+
+            # Log token mapping for live debugging (compact — one line per market)
+            if config.EXECUTION_MODE == "live":
+                log.info(
+                    f"Token map [{market_type}]: UP={up_token_id[:20]}...({len(up_token_id)}ch) "
+                    f"DOWN={down_token_id[:20]}...({len(down_token_id)}ch) "
+                    f"slug={slug[:40]} cond={condition_id[:16]}"
+                )
 
             # Prices: prefer live CLOB midpoint (freshest), fall back to Gamma outcomePrices
             clob_yes, clob_no = await self._fetch_prices(up_token_id, down_token_id)
