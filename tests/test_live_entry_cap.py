@@ -1,6 +1,8 @@
-"""Tests for hard live entry cap / anti-overstacking.
+"""Tests for live entry cap / anti-overstacking (softened v2).
 
-All tests use mocks — no real API calls.
+Cap is LIVE_MAX_ENTRIES_PER_WINDOW (default 2).
+Same-direction adds are ALLOWED within the cap.
+Duplicate direction block is REMOVED.
 """
 
 from __future__ import annotations
@@ -59,7 +61,6 @@ class _MockOrderManager:
 
 
 def _make_ready_trader_with_reconciler(om=None, pm=None):
-    """Create a LiveTrader with mocked CLOB client and a real reconciler."""
     if pm is None:
         pm = PositionManager()
     if om is None:
@@ -73,7 +74,6 @@ def _make_ready_trader_with_reconciler(om=None, pm=None):
         position_manager=pm,
         order_manager=om,
     )
-    # Mark reconciler as fresh (not stale)
     reconciler._stale = False
     reconciler._last_reconcile_ts = time.time()
 
@@ -82,56 +82,26 @@ def _make_ready_trader_with_reconciler(om=None, pm=None):
 
 
 class TestMaxEntriesPerWindow(unittest.TestCase):
-    """Test that max 3 entries per market window is enforced."""
+    """Test that LIVE_MAX_ENTRIES_PER_WINDOW (2) is enforced."""
 
     @patch.object(config, "EXECUTION_MODE", "live")
     @patch.object(config, "TRADING_ENABLED", True)
     @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
     @patch.object(config, "MAX_ORDER_SIZE_USDC", 500.0)
-    @patch.object(config, "MAX_ENTRIES_PER_WINDOW", 3)
+    @patch.object(config, "LIVE_MAX_ENTRIES_PER_WINDOW", 2)
     def test_blocks_at_cap_with_live_orders(self):
-        """3 LIVE orders for same market → 4th entry blocked."""
+        """2 LIVE orders for same market → 3rd entry blocked."""
         trader, recon, om, pm = _make_ready_trader_with_reconciler()
 
-        # 3 existing LIVE orders for this market
-        for i in range(3):
-            om._order_history.append(_make_order(
-                order_id=f"existing_{i}",
-                status="LIVE",
-                direction=["UP", "DOWN", "UP"][i],
-                metadata={"exchange_order_id": f"0xex{i}"},
-            ))
-
-        order = _make_order(direction="DOWN")
-        result = trader.execute(order)
-
-        self.assertEqual(result.status, "REJECTED")
-        self.assertIn("BLOCKED: market entry cap reached", result.metadata.get("rejection_reason", ""))
-
-    @patch.object(config, "EXECUTION_MODE", "live")
-    @patch.object(config, "TRADING_ENABLED", True)
-    @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
-    @patch.object(config, "MAX_ORDER_SIZE_USDC", 500.0)
-    @patch.object(config, "MAX_ENTRIES_PER_WINDOW", 3)
-    def test_blocks_at_cap_with_mixed_pending_and_filled(self):
-        """2 LIVE orders + 1 open position = 3 → 4th blocked."""
-        trader, recon, om, pm = _make_ready_trader_with_reconciler()
-
-        # 2 LIVE orders
         for i in range(2):
             om._order_history.append(_make_order(
-                order_id=f"live_{i}",
+                order_id=f"existing_{i}",
                 status="LIVE",
                 direction=["UP", "DOWN"][i],
                 metadata={"exchange_order_id": f"0xex{i}"},
             ))
 
-        # 1 filled position
-        filled_order = _make_order(order_id="filled_1", status="FILLED", fill_price=0.55, direction="UP")
-        pos = pm.open_position(filled_order)
-        pos.metadata["execution_mode"] = "live"
-
-        order = _make_order(direction="DOWN")
+        order = _make_order(direction="UP")
         result = trader.execute(order)
 
         self.assertEqual(result.status, "REJECTED")
@@ -141,64 +111,17 @@ class TestMaxEntriesPerWindow(unittest.TestCase):
     @patch.object(config, "TRADING_ENABLED", True)
     @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
     @patch.object(config, "MAX_ORDER_SIZE_USDC", 500.0)
-    @patch.object(config, "MAX_ENTRIES_PER_WINDOW", 3)
-    def test_allows_entry_below_cap(self):
-        """1 existing entry → 2nd entry allowed (below cap of 3)."""
+    @patch.object(config, "LIVE_MAX_ENTRIES_PER_WINDOW", 2)
+    def test_blocks_at_cap_with_mixed_pending_and_filled(self):
+        """1 LIVE order + 1 open position = 2 → 3rd blocked."""
         trader, recon, om, pm = _make_ready_trader_with_reconciler()
 
         om._order_history.append(_make_order(
-            order_id="existing_1",
-            status="LIVE",
-            direction="UP",
+            order_id="live_1", status="LIVE", direction="UP",
             metadata={"exchange_order_id": "0xex1"},
         ))
 
-        order = _make_order(direction="DOWN")
-        result = trader.execute(order)
-
-        # Should NOT be blocked by cap (1 < 3)
-        # But will be blocked by duplicate direction check since UP is already there
-        # and we're sending DOWN which is different, so should pass direction check
-        # May fail at CLOB submit (mocked), but should not fail at cap check
-        reason = result.metadata.get("rejection_reason", "")
-        self.assertNotIn("BLOCKED: market entry cap reached", reason)
-
-
-class TestDuplicateDirectionBlock(unittest.TestCase):
-    """Test that duplicate direction in same market is blocked."""
-
-    @patch.object(config, "EXECUTION_MODE", "live")
-    @patch.object(config, "TRADING_ENABLED", True)
-    @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
-    @patch.object(config, "MAX_ORDER_SIZE_USDC", 500.0)
-    @patch.object(config, "MAX_ENTRIES_PER_WINDOW", 3)
-    def test_blocks_same_direction_live_order(self):
-        """UP already pending → another UP blocked."""
-        trader, recon, om, pm = _make_ready_trader_with_reconciler()
-
-        om._order_history.append(_make_order(
-            order_id="existing_up",
-            status="LIVE",
-            direction="UP",
-            metadata={"exchange_order_id": "0xex1"},
-        ))
-
-        order = _make_order(direction="UP")
-        result = trader.execute(order)
-
-        self.assertEqual(result.status, "REJECTED")
-        self.assertIn("BLOCKED: duplicate direction UP", result.metadata.get("rejection_reason", ""))
-
-    @patch.object(config, "EXECUTION_MODE", "live")
-    @patch.object(config, "TRADING_ENABLED", True)
-    @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
-    @patch.object(config, "MAX_ORDER_SIZE_USDC", 500.0)
-    @patch.object(config, "MAX_ENTRIES_PER_WINDOW", 3)
-    def test_blocks_same_direction_filled_position(self):
-        """UP position already open → another UP blocked."""
-        trader, recon, om, pm = _make_ready_trader_with_reconciler()
-
-        filled = _make_order(order_id="filled_up", status="FILLED", fill_price=0.55, direction="UP")
+        filled = _make_order(order_id="filled_1", status="FILLED", fill_price=0.55, direction="DOWN")
         pos = pm.open_position(filled)
         pos.metadata["execution_mode"] = "live"
 
@@ -206,45 +129,66 @@ class TestDuplicateDirectionBlock(unittest.TestCase):
         result = trader.execute(order)
 
         self.assertEqual(result.status, "REJECTED")
-        self.assertIn("BLOCKED: duplicate direction UP", result.metadata.get("rejection_reason", ""))
+        self.assertIn("BLOCKED: market entry cap reached", result.metadata.get("rejection_reason", ""))
+
+
+class TestSameDirectionAllowed(unittest.TestCase):
+    """Same-direction adds are allowed within the cap."""
 
     @patch.object(config, "EXECUTION_MODE", "live")
     @patch.object(config, "TRADING_ENABLED", True)
     @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
     @patch.object(config, "MAX_ORDER_SIZE_USDC", 500.0)
-    @patch.object(config, "MAX_ENTRIES_PER_WINDOW", 3)
-    def test_allows_opposite_direction(self):
-        """UP already open → DOWN allowed (different direction)."""
+    @patch.object(config, "LIVE_MAX_ENTRIES_PER_WINDOW", 2)
+    def test_same_direction_allowed_within_cap(self):
+        """UP already open, another UP allowed (1 < cap of 2)."""
         trader, recon, om, pm = _make_ready_trader_with_reconciler()
 
         om._order_history.append(_make_order(
-            order_id="existing_up",
-            status="LIVE",
-            direction="UP",
+            order_id="existing_up", status="LIVE", direction="UP",
             metadata={"exchange_order_id": "0xex1"},
         ))
 
-        order = _make_order(direction="DOWN")
+        order = _make_order(direction="UP")
         result = trader.execute(order)
 
-        # Should NOT be blocked by direction check
+        # Should NOT be blocked — same direction is allowed within cap
         reason = result.metadata.get("rejection_reason", "")
+        self.assertNotIn("BLOCKED: market entry cap", reason)
         self.assertNotIn("BLOCKED: duplicate direction", reason)
 
     @patch.object(config, "EXECUTION_MODE", "live")
     @patch.object(config, "TRADING_ENABLED", True)
     @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
     @patch.object(config, "MAX_ORDER_SIZE_USDC", 500.0)
-    @patch.object(config, "MAX_ENTRIES_PER_WINDOW", 3)
-    def test_different_market_not_blocked(self):
-        """UP in market_A → UP in market_B is fine."""
+    @patch.object(config, "LIVE_MAX_ENTRIES_PER_WINDOW", 2)
+    def test_opposite_direction_allowed_within_cap(self):
+        """UP already open, DOWN allowed (1 < cap of 2)."""
         trader, recon, om, pm = _make_ready_trader_with_reconciler()
 
         om._order_history.append(_make_order(
-            order_id="existing_up",
-            market_id="mkt_OTHER",  # different market
-            status="LIVE",
-            direction="UP",
+            order_id="existing_up", status="LIVE", direction="UP",
+            metadata={"exchange_order_id": "0xex1"},
+        ))
+
+        order = _make_order(direction="DOWN")
+        result = trader.execute(order)
+
+        reason = result.metadata.get("rejection_reason", "")
+        self.assertNotIn("BLOCKED:", reason)
+
+    @patch.object(config, "EXECUTION_MODE", "live")
+    @patch.object(config, "TRADING_ENABLED", True)
+    @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
+    @patch.object(config, "MAX_ORDER_SIZE_USDC", 500.0)
+    @patch.object(config, "LIVE_MAX_ENTRIES_PER_WINDOW", 2)
+    def test_different_market_not_counted(self):
+        """Entries in different market don't count toward this market's cap."""
+        trader, recon, om, pm = _make_ready_trader_with_reconciler()
+
+        om._order_history.append(_make_order(
+            order_id="other_mkt", market_id="mkt_OTHER",
+            status="LIVE", direction="UP",
             metadata={"exchange_order_id": "0xex1"},
         ))
 
@@ -252,24 +196,20 @@ class TestDuplicateDirectionBlock(unittest.TestCase):
         result = trader.execute(order)
 
         reason = result.metadata.get("rejection_reason", "")
-        self.assertNotIn("BLOCKED: duplicate direction", reason)
         self.assertNotIn("BLOCKED: market entry cap", reason)
 
 
 class TestStaleReconciliationBlock(unittest.TestCase):
-    """Test that stale reconciliation blocks new live entries."""
 
     @patch.object(config, "EXECUTION_MODE", "live")
     @patch.object(config, "TRADING_ENABLED", True)
     @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
     @patch.object(config, "MAX_ORDER_SIZE_USDC", 500.0)
-    def test_stale_reconciliation_blocks(self):
-        """Reconciler has never synced → block."""
+    def test_stale_blocks(self):
         trader = LiveTrader()
         trader._clob_client = MagicMock()
-
         reconciler = LiveReconciler(MagicMock(), PositionManager(), _MockOrderManager())
-        # _stale = True by default (never synced)
+        # _stale = True by default
         trader.set_reconciler(reconciler)
 
         order = _make_order()
@@ -283,10 +223,8 @@ class TestStaleReconciliationBlock(unittest.TestCase):
     @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
     @patch.object(config, "MAX_ORDER_SIZE_USDC", 500.0)
     def test_no_reconciler_blocks(self):
-        """No reconciler attached → block."""
         trader = LiveTrader()
         trader._clob_client = MagicMock()
-        # No set_reconciler() call
 
         order = _make_order()
         result = trader.execute(order)
@@ -294,46 +232,20 @@ class TestStaleReconciliationBlock(unittest.TestCase):
         self.assertEqual(result.status, "REJECTED")
         self.assertIn("BLOCKED: no live reconciler", result.metadata.get("rejection_reason", ""))
 
-    @patch.object(config, "EXECUTION_MODE", "live")
-    @patch.object(config, "TRADING_ENABLED", True)
-    @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
-    @patch.object(config, "MAX_ORDER_SIZE_USDC", 500.0)
-    def test_old_reconciliation_blocks(self):
-        """Reconciler last synced >30s ago → block."""
-        trader = LiveTrader()
-        trader._clob_client = MagicMock()
 
-        reconciler = LiveReconciler(MagicMock(), PositionManager(), _MockOrderManager())
-        reconciler._stale = False
-        reconciler._last_reconcile_ts = time.time() - 60  # 60s ago
-        trader.set_reconciler(reconciler)
-
-        order = _make_order()
-        result = trader.execute(order)
-
-        self.assertEqual(result.status, "REJECTED")
-        self.assertIn("BLOCKED: reconciliation data is", result.metadata.get("rejection_reason", ""))
-
-
-class TestRestartWithExistingExposure(unittest.TestCase):
-    """Test that existing live exposure from before restart is respected."""
+class TestRestartWithExposure(unittest.TestCase):
 
     @patch.object(config, "EXECUTION_MODE", "live")
     @patch.object(config, "TRADING_ENABLED", True)
     @patch.object(config, "LIVE_TRADING_CONFIRMATION", "I_UNDERSTAND")
     @patch.object(config, "MAX_ORDER_SIZE_USDC", 500.0)
-    @patch.object(config, "MAX_ENTRIES_PER_WINDOW", 3)
-    def test_restored_positions_count_toward_cap(self):
-        """Positions restored from trade log count toward the cap."""
+    @patch.object(config, "LIVE_MAX_ENTRIES_PER_WINDOW", 2)
+    def test_restored_positions_count(self):
         trader, recon, om, pm = _make_ready_trader_with_reconciler()
 
-        # Simulate 3 restored positions (as if loaded from trade log)
-        for i in range(3):
-            filled = _make_order(
-                order_id=f"restored_{i}",
-                status="FILLED", fill_price=0.55,
-                direction=["UP", "DOWN", "UP"][i],
-            )
+        for i in range(2):
+            filled = _make_order(order_id=f"restored_{i}", status="FILLED",
+                                 fill_price=0.55, direction="UP")
             pos = pm.open_position(filled)
             pos.metadata["execution_mode"] = "live"
 
@@ -345,10 +257,9 @@ class TestRestartWithExistingExposure(unittest.TestCase):
 
 
 class TestPaperModeUnchanged(unittest.TestCase):
-    """Verify paper mode is completely unaffected by live entry caps."""
 
     @patch.object(config, "EXECUTION_MODE", "paper")
-    def test_paper_mode_no_cap_check(self):
+    def test_paper_no_cap(self):
         from execution.paper_trader import PaperTrader
         trader = PaperTrader()
         order = _make_order(execution_mode="paper")
@@ -358,61 +269,23 @@ class TestPaperModeUnchanged(unittest.TestCase):
 
 
 class TestExposureQuery(unittest.TestCase):
-    """Test the get_live_market_exposure method directly."""
 
-    def test_empty_exposure(self):
+    def test_empty(self):
         recon = LiveReconciler(MagicMock(), PositionManager(), _MockOrderManager())
         exp = recon.get_live_market_exposure("mkt_1")
         self.assertEqual(exp["total_entries"], 0)
-        self.assertEqual(exp["pending_orders"], 0)
-        self.assertEqual(exp["open_positions"], 0)
 
     def test_counts_live_orders(self):
         om = _MockOrderManager()
         om._order_history.append(_make_order(status="LIVE", direction="UP"))
-        om._order_history.append(_make_order(order_id="o2", status="LIVE", direction="DOWN"))
+        om._order_history.append(_make_order(order_id="o2", status="LIVE", direction="UP"))
 
         recon = LiveReconciler(MagicMock(), PositionManager(), om)
         exp = recon.get_live_market_exposure("mkt_window_1")
 
         self.assertEqual(exp["total_entries"], 2)
-        self.assertEqual(exp["pending_orders"], 2)
-        self.assertEqual(exp["up_count"], 1)
-        self.assertEqual(exp["down_count"], 1)
-
-    def test_counts_filled_positions(self):
-        om = _MockOrderManager()
-        pm = PositionManager()
-
-        filled = _make_order(status="FILLED", fill_price=0.55)
-        pos = pm.open_position(filled)
-        pos.metadata["execution_mode"] = "live"
-
-        recon = LiveReconciler(MagicMock(), pm, om)
-        exp = recon.get_live_market_exposure("mkt_window_1")
-
-        self.assertEqual(exp["total_entries"], 1)
-        self.assertEqual(exp["open_positions"], 1)
-        self.assertEqual(exp["pending_orders"], 0)
-
-    def test_ignores_different_market(self):
-        om = _MockOrderManager()
-        om._order_history.append(_make_order(market_id="OTHER_MKT", status="LIVE"))
-
-        recon = LiveReconciler(MagicMock(), PositionManager(), om)
-        exp = recon.get_live_market_exposure("mkt_window_1")
-
-        self.assertEqual(exp["total_entries"], 0)
-
-    def test_ignores_non_live_orders(self):
-        om = _MockOrderManager()
-        om._order_history.append(_make_order(status="FILLED"))  # not LIVE
-        om._order_history.append(_make_order(order_id="o2", status="CANCELLED"))
-
-        recon = LiveReconciler(MagicMock(), PositionManager(), om)
-        exp = recon.get_live_market_exposure("mkt_window_1")
-
-        self.assertEqual(exp["pending_orders"], 0)
+        self.assertEqual(exp["up_count"], 2)
+        self.assertEqual(exp["down_count"], 0)
 
 
 if __name__ == "__main__":

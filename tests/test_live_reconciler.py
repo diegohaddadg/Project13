@@ -346,10 +346,11 @@ class TestRedemptionFailureRetry(unittest.TestCase):
         recon = LiveReconciler(client, pm, om)
         summary = recon.reconcile()
 
-        # Position should still be open (redemption failed)
+        # Position should still be open (redemption failed) and marked CLAIMABLE
         self.assertEqual(pm.count_open_positions(), 1)
-        # But retry metadata should be set
+        self.assertEqual(pos.status, "CLAIMABLE")
         self.assertGreater(pos.metadata.get("redeem_retry_count", 0), 0)
+        self.assertIsNotNone(pos.metadata.get("claimable_since"))
 
     @patch.object(config, "EXECUTION_MODE", "live")
     @patch.object(config, "LIVE_RECONCILIATION_ENABLED", True)
@@ -377,7 +378,38 @@ class TestRedemptionFailureRetry(unittest.TestCase):
 
         # Should NOT attempt redemption
         self.assertEqual(summary["redemptions_this_cycle"], 0)
-        client.redeem.assert_not_called() if hasattr(client, 'redeem') else None
+
+    @patch.object(config, "EXECUTION_MODE", "live")
+    @patch.object(config, "LIVE_RECONCILIATION_ENABLED", True)
+    @patch.object(config, "LIVE_AUTO_REDEEM_ENABLED", True)
+    @patch.object(config, "LIVE_REDEEM_MAX_RETRIES", 2)
+    @patch.object(config, "LIVE_REDEEM_RETRY_BACKOFF_SECONDS", 0.01)
+    def test_max_retries_marks_claimable_manual(self):
+        """After max retries, position stays CLAIMABLE and logs manual action required."""
+        pm = PositionManager()
+        om = _MockOrderManager()
+        client = MagicMock()
+
+        order = _make_live_order(status="FILLED", fill_price=0.55)
+        om._order_history.append(order)
+        pos = pm.open_position(order)
+        pos.metadata["condition_id"] = "0xcond456"
+        pos.metadata["token_id"] = "tok_winner"
+        pos.metadata["execution_mode"] = "live"
+        pos.metadata["redeem_retry_count"] = 2  # already at max
+
+        client.get_market.return_value = {
+            "closed": True, "resolved": True,
+            "tokens": [{"token_id": "tok_winner", "winner": 1.0}],
+        }
+
+        recon = LiveReconciler(client, pm, om)
+        recon.reconcile()
+
+        # Should NOT close position — manual action needed
+        self.assertEqual(pm.count_open_positions(), 1)
+        self.assertEqual(pos.status, "CLAIMABLE")
+        self.assertIsNone(pos.pnl)  # capital NOT returned
 
 
 class TestReconcileSkipConditions(unittest.TestCase):

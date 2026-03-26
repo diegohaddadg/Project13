@@ -191,6 +191,8 @@ LIVE_AUTO_REDEEM_ENABLED = os.getenv("LIVE_AUTO_REDEEM_ENABLED", "true").lower()
 LIVE_RECONCILE_INTERVAL_SECONDS = float(os.getenv("LIVE_RECONCILE_INTERVAL_SECONDS", "5.0"))
 LIVE_REDEEM_RETRY_BACKOFF_SECONDS = 30.0
 LIVE_REDEEM_MAX_RETRIES = 5
+# Hard cap for live mode entries per market window (separate from paper MAX_ENTRIES_PER_WINDOW)
+LIVE_MAX_ENTRIES_PER_WINDOW = int(os.getenv("LIVE_MAX_ENTRIES_PER_WINDOW", "2"))
 
 # --- Risk Engine (Phase 5) ---
 

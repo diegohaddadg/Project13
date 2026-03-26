@@ -169,6 +169,8 @@ class LiveTrader:
 
         Returns rejection reason string, or None if entry is allowed.
         Fail-closed: if reconciliation is unavailable or stale, block entry.
+
+        Same-direction adds are allowed within the cap (no duplicate-direction block).
         """
         # Gate A: reconciler must exist and not be stale
         if self._reconciler is None:
@@ -195,7 +197,7 @@ class LiveTrader:
         exposure = self._reconciler.get_live_market_exposure(order.market_id)
 
         total = exposure["total_entries"]
-        cap = config.MAX_ENTRIES_PER_WINDOW
+        cap = config.LIVE_MAX_ENTRIES_PER_WINDOW
 
         # Gate C: hard cap on entries per market window
         if total >= cap:
@@ -209,16 +211,12 @@ class LiveTrader:
                 f"{exposure['pending_orders']} pending + {exposure['open_positions']} filled)"
             )
 
-        # Gate D: duplicate direction block
+        # Same-direction adds allowed within cap — log for visibility
         if order.direction in exposure["active_directions"]:
-            log.warning(
-                f"[LIVE] BLOCKED: duplicate direction {order.direction} already "
-                f"open/pending for {order.market_id} "
-                f"(UP={exposure['up_count']} DOWN={exposure['down_count']})"
-            )
-            return (
-                f"BLOCKED: duplicate direction {order.direction} already open/pending "
-                f"for this market window (UP={exposure['up_count']} DOWN={exposure['down_count']})"
+            log.info(
+                f"[LIVE] ALLOWED: same-direction add {order.direction} within cap "
+                f"for {order.market_id} ({total}/{cap} entries, "
+                f"UP={exposure['up_count']} DOWN={exposure['down_count']})"
             )
 
         # All caps passed — log exposure state for audit trail

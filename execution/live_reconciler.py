@@ -245,11 +245,21 @@ class LiveReconciler:
     # ------------------------------------------------------------------
 
     def _check_and_redeem(self, summary: dict) -> None:
-        """Check for resolved winning positions and attempt redemption."""
+        """Check for resolved markets and handle winning/losing positions."""
         for pos in list(self._pm.get_open_positions()):
             if pos.metadata.get("execution_mode") != "live":
                 continue
             if pos.metadata.get("redeemed"):
+                continue
+            # Skip positions already marked claimable (waiting for manual action)
+            if pos.status == "CLAIMABLE":
+                # Still count for dashboard visibility
+                cooldown_until = self._redeem_cooldowns.get(pos.position_id, 0)
+                if time.time() >= cooldown_until:
+                    # Retry redemption for CLAIMABLE positions
+                    condition_id = pos.metadata.get("condition_id", "")
+                    if condition_id:
+                        self._attempt_redemption(pos, condition_id, summary)
                 continue
 
             condition_id = pos.metadata.get("condition_id", "")
@@ -280,6 +290,11 @@ class LiveReconciler:
             won = (pos_token == winning_token)
 
             if won:
+                log.warning(
+                    f"[RECON] WIN DETECTED: {pos.direction} {pos.market_type} "
+                    f"{pos.num_shares:.1f}sh @{pos.entry_price:.3f} "
+                    f"condition={condition_id[:16]}..."
+                )
                 self._attempt_redemption(pos, condition_id, summary)
             else:
                 # Loss — close position locally with resolution_price=0
@@ -314,34 +329,40 @@ class LiveReconciler:
             return None
 
     def _attempt_redemption(self, pos: Position, condition_id: str, summary: dict) -> None:
-        """Attempt to redeem a winning resolved position."""
+        """Attempt to redeem a winning resolved position.
+
+        If redemption succeeds: close position, return capital, mark redeemed.
+        If redemption fails: mark CLAIMABLE, do NOT close position, do NOT fake capital return.
+        After max retries: log CLAIMABLE_MANUAL_ACTION_REQUIRED.
+        """
         retry_count = pos.metadata.get("redeem_retry_count", 0)
         if retry_count >= config.LIVE_REDEEM_MAX_RETRIES:
+            # Mark as claimable — needs manual action
+            if pos.status != "CLAIMABLE":
+                pos.status = "CLAIMABLE"
+                pos.metadata["claimable_since"] = time.time()
             log.warning(
-                f"[RECON] REDEEM MAX RETRIES for {pos.position_id}: "
-                f"tried {retry_count} times — giving up"
+                f"[RECON] CLAIMABLE_MANUAL_ACTION_REQUIRED: {pos.direction} {pos.market_type} "
+                f"{pos.num_shares:.1f}sh — auto-redeem exhausted after {retry_count} attempts. "
+                f"Claim manually via Polymarket UI."
             )
             return
 
         log.warning(
             f"[RECON] REDEEMING: {pos.direction} {pos.market_type} "
             f"{pos.num_shares:.1f}sh @{pos.entry_price:.3f} "
-            f"condition={condition_id[:16]}..."
+            f"condition={condition_id[:16]}... (attempt {retry_count + 1}/{config.LIVE_REDEEM_MAX_RETRIES})"
         )
 
         try:
-            # Use py-clob-client's redeem method if available,
-            # otherwise fall back to direct contract call
             success = self._execute_redemption(condition_id, pos)
 
             if success:
-                # Close position locally as a win
+                # Confirmed on-chain redeem — NOW close position and return capital
                 resolved_pos = self._pm.close_position(pos.position_id, 1.0)
                 if resolved_pos:
                     resolved_pos.metadata["redeemed"] = True
                     resolved_pos.metadata["redeem_ts"] = time.time()
-
-                    # Sync PnL to order
                     if resolved_pos.order_id and resolved_pos.pnl is not None:
                         self._om.sync_order_pnl_from_position(
                             resolved_pos.order_id, resolved_pos.pnl
@@ -350,17 +371,28 @@ class LiveReconciler:
                 self._redeemed_count += 1
                 summary["redemptions_this_cycle"] += 1
 
+                pnl_str = f" PnL={resolved_pos.pnl:+.2f}" if resolved_pos and resolved_pos.pnl is not None else ""
                 log.warning(
                     f"[RECON] REDEEMED: {pos.direction} {pos.market_type} "
-                    f"PnL={resolved_pos.pnl:+.2f}" if resolved_pos and resolved_pos.pnl is not None
-                    else f"[RECON] REDEEMED: {pos.direction} {pos.market_type}"
+                    f"{pos.num_shares:.1f}sh{pnl_str}"
                 )
             else:
+                # Redemption method returned False — mark claimable, schedule retry
+                if pos.status != "CLAIMABLE":
+                    pos.status = "CLAIMABLE"
+                    pos.metadata["claimable_since"] = time.time()
                 self._schedule_retry(pos)
+                log.warning(
+                    f"[RECON] REDEEM FAILED (no method succeeded): {pos.direction} {pos.market_type} "
+                    f"— marked CLAIMABLE, will retry"
+                )
 
         except Exception as e:
             self._redeem_failures += 1
             self._last_error = f"redemption failed: {e}"
+            if pos.status != "CLAIMABLE":
+                pos.status = "CLAIMABLE"
+                pos.metadata["claimable_since"] = time.time()
             self._schedule_retry(pos)
             log.error(f"[RECON] REDEEM FAILED: {pos.position_id} — {e}")
 
@@ -578,6 +610,11 @@ class LiveReconciler:
 
     def get_status(self) -> dict:
         """Return reconciliation status for dashboard."""
+        # Count claimable positions (winners awaiting manual redeem)
+        claimable = [
+            p for p in self._pm.get_open_positions()
+            if p.status == "CLAIMABLE"
+        ]
         return {
             "enabled": config.LIVE_RECONCILIATION_ENABLED,
             "auto_redeem_enabled": config.LIVE_AUTO_REDEEM_ENABLED,
@@ -589,7 +626,7 @@ class LiveReconciler:
             "cancels_detected": self._cancels_detected,
             "redeemed_count": self._redeemed_count,
             "redeem_failures": self._redeem_failures,
-            "pending_redemptions": len(self._pending_redemptions),
+            "claimable_count": len(claimable),
             "errors": self._errors,
             "last_error": self._last_error,
         }

@@ -27,7 +27,7 @@ class Position:
     entry_price: float = 0.0
     num_shares: float = 0.0
     entry_timestamp: float = field(default_factory=time.time)
-    status: str = "OPEN"           # "OPEN" | "RESOLVED" | "CLOSED"
+    status: str = "OPEN"           # "OPEN" | "CLAIMABLE" | "RESOLVED" | "CLOSED"
     resolution_price: Optional[float] = None  # 1.0 (won) or 0.0 (lost)
     pnl: Optional[float] = None
     metadata: dict = field(default_factory=dict)
