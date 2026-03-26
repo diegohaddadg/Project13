@@ -28,6 +28,11 @@ if TYPE_CHECKING:
 
 log = get_logger("live_recon")
 
+# Proof-of-module: log the actual file path at import time so we can verify
+# the droplet is running THIS version, not a stale cached copy.
+import pathlib as _pathlib
+log.warning(f"[RECON] module loaded from {_pathlib.Path(__file__).resolve()}")
+
 # CLOB order statuses
 _CLOB_FILLED = "MATCHED"
 _CLOB_LIVE = "LIVE"
@@ -282,10 +287,11 @@ class LiveReconciler:
                 continue
 
             # Check if market is resolved on exchange
-            log.info(
+            log.warning(
                 f"[RECON] RESOLUTION CHECK START: pos={pos.position_id} "
-                f"direction={pos.direction} condition={condition_id[:16]}... "
-                f"token={pos_token[-12:] if pos_token else 'NONE'}"
+                f"market_id={pos.market_id} direction={pos.direction} "
+                f"condition={condition_id[:16]}... "
+                f"token=...{pos_token[-12:] if pos_token else 'NONE'}"
             )
 
             resolved_info = self._check_market_resolved(condition_id, market_id=pos.market_id)
@@ -344,6 +350,8 @@ class LiveReconciler:
         source = "none"
 
         # Primary: Gamma /markets/{id} — direct single-market lookup by numeric ID
+        if not market_id:
+            log.warning(f"[RECON] market_id is EMPTY for condition={condition_id[:16]}... — Gamma lookup will fail")
         if market_id:
             try:
                 import urllib.request

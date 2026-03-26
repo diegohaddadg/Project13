@@ -129,6 +129,9 @@ class PositionManager:
                 "execution_mode": order.execution_mode,
                 "strike": order.metadata.get("strike", 0),
                 "strategy": order.metadata.get("strategy", ""),
+                # Carry through condition_id and token_id for redemption after restart
+                "condition_id": order.metadata.get("condition_id", ""),
+                "token_id": order.token_id,
             },
         )
         self._open_positions.append(pos)
@@ -196,6 +199,18 @@ class PositionManager:
         """
         open_value = sum(p.entry_price * p.num_shares for p in self._open_positions)
         return self._available_capital + open_value
+
+    def get_risk_equity(self) -> float:
+        """Equity base for risk/sizing/exposure calculations.
+
+        When PAPER_LIKE_RISK_MODE is enabled, returns max(actual_equity, baseline)
+        so a small live account can trade with paper-like aggressiveness.
+        When disabled, returns actual total equity (identical to get_total_equity).
+        """
+        actual = self.get_total_equity()
+        if config.PAPER_LIKE_RISK_MODE:
+            return max(actual, config.PAPER_LIKE_BASELINE_USDC)
+        return actual
 
     # --- Statistics ---
 
