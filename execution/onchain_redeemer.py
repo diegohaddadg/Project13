@@ -238,10 +238,20 @@ class OnchainRedeemer:
             args=[cond_bytes, [1, 2]],
         )
 
+        log.warning(f"[REDEEM] DETECTED PROXY WALLET:")
+        log.warning(f"[REDEEM]   signer_eoa={self._account.address}")
+        log.warning(f"[REDEEM]   proxy_funder={self._funder}")
+        log.warning(f"[REDEEM]   TARGET CONTRACT: NegRiskAdapter={NEG_RISK_ADAPTER}")
+        log.warning(f"[REDEEM]   INNER CALLDATA: redeemPositions(conditionId, [1,2])")
+        log.warning(f"[REDEEM]   CALLDATA_HEX: {redeem_calldata[:20]}...({len(redeem_calldata)} chars)")
+        log.warning(f"[REDEEM]   PROXY EXECUTE: proxy.execute(negRiskAdapter, calldata)")
+        log.warning(f"[REDEEM]   PROXY EXECUTE SIGNATURE: execute(address,bytes)")
+
         # Wrap in proxy.execute(to, data)
+        calldata_bytes = bytes.fromhex(redeem_calldata[2:]) if redeem_calldata.startswith("0x") else bytes.fromhex(redeem_calldata)
         tx = self._proxy_contract.functions.execute(
             Web3.to_checksum_address(NEG_RISK_ADAPTER),
-            bytes.fromhex(redeem_calldata[2:]),  # strip 0x prefix
+            calldata_bytes,
         ).build_transaction({
             "from": self._account.address,
             "nonce": self._w3.eth.get_transaction_count(self._account.address),
@@ -250,7 +260,7 @@ class OnchainRedeemer:
             "chainId": 137,
         })
 
-        log.info(f"[REDEEM] Routing through proxy {self._funder[:12]}... → NegRiskAdapter")
+        log.warning(f"[REDEEM] TX built: from={self._account.address[:12]}... gas=400000")
         return self._sign_and_send(tx)
 
     def _redeem_direct(self, cond_bytes: bytes) -> dict:
@@ -269,29 +279,55 @@ class OnchainRedeemer:
         return self._sign_and_send(tx)
 
     def _sign_and_send(self, tx: dict) -> dict:
-        """Sign, send, wait for receipt."""
+        """Sign, send, wait for receipt. Logs detailed diagnostics."""
         signed = self._w3.eth.account.sign_transaction(tx, self._account.key)
         tx_hash = self._w3.eth.send_raw_transaction(signed.raw_transaction)
         tx_hash_hex = tx_hash.hex() if isinstance(tx_hash, bytes) else str(tx_hash)
 
-        log.info(f"[REDEEM] TX SUBMITTED: {tx_hash_hex}")
+        log.warning(f"[REDEEM] TX SUBMITTED: {tx_hash_hex}")
 
         receipt = self._w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
 
-        if receipt["status"] == 1:
+        status = receipt.get("status")
+        gas_used = receipt.get("gasUsed")
+        log.warning(f"[REDEEM] RECEIPT STATUS: {status} gas_used={gas_used}")
+
+        if status == 1:
             return {
                 "success": True,
                 "tx_hash": tx_hash_hex,
                 "error": None,
-                "gas_used": receipt.get("gasUsed"),
+                "gas_used": gas_used,
             }
         else:
+            # Try to extract revert reason
+            revert_reason = self._get_revert_reason(tx, tx_hash_hex)
+            error_msg = f"TX reverted (status=0)"
+            if revert_reason:
+                error_msg += f" reason: {revert_reason}"
+                log.error(f"[REDEEM] REVERT REASON: {revert_reason}")
             return {
                 "success": False,
                 "tx_hash": tx_hash_hex,
-                "error": "TX reverted (status=0)",
-                "gas_used": receipt.get("gasUsed"),
+                "error": error_msg,
+                "gas_used": gas_used,
             }
+
+    def _get_revert_reason(self, tx: dict, tx_hash: str) -> str:
+        """Attempt to extract revert reason from a failed transaction."""
+        try:
+            # Try eth_call to replay and get error message
+            call_tx = {k: v for k, v in tx.items() if k in ("from", "to", "data", "value", "gas")}
+            self._w3.eth.call(call_tx)
+            return ""  # no revert on replay — timing/state dependent
+        except Exception as e:
+            reason = str(e)
+            # Extract the readable part from web3 error messages
+            if "execution reverted" in reason.lower():
+                return reason
+            if len(reason) > 200:
+                return reason[:200] + "..."
+            return reason
 
 
 def _to_bytes32(hex_str: str) -> Optional[bytes]:

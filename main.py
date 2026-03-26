@@ -296,10 +296,12 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
                     and now - last_recon_check >= config.LIVE_RECONCILE_INTERVAL_SECONDS):
                 last_recon_check = now
                 recon = om.live_reconciler.reconcile()
-                # Feed resolved positions from reconciler into risk tracking
-                if recon.get("fills_this_cycle", 0) > 0:
-                    for pos in pm.get_closed_positions()[-recon["fills_this_cycle"]:]:
-                        if pos.pnl is not None:
+                # Feed reconciler-detected redemptions into risk tracking
+                # (fills are not resolutions — they create open positions, not closed ones)
+                if recon.get("redemptions_this_cycle", 0) > 0:
+                    for pos in pm.get_closed_positions()[-recon["redemptions_this_cycle"]:]:
+                        if pos.pnl is not None and not pos.metadata.get("risk_recorded"):
+                            pos.metadata["risk_recorded"] = True
                             rm.record_trade_result(pos)
 
             if now - last_res_check >= config.RESOLUTION_POLL_INTERVAL_SECONDS:
@@ -308,8 +310,9 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
                 m15 = agg.get_current_market("btc-15min")
                 closed = ft.check_resolutions(m5, m15)
                 for pos in closed:
-                    # Performance counts via RiskManager only (avoid double-counting analytics)
-                    rm.record_trade_result(pos)
+                    if not pos.metadata.get("risk_recorded"):
+                        pos.metadata["risk_recorded"] = True
+                        rm.record_trade_result(pos)
 
             if now - last_report >= config.PERFORMANCE_REPORT_INTERVAL_MINUTES * 60:
                 last_report = now
