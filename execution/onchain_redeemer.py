@@ -2,16 +2,21 @@
 
 Polymarket BTC up/down markets are neg-risk binary markets on Polygon.
 Winning positions are redeemed by calling redeemPositions() on the
-NegRiskAdapter contract, which burns conditional tokens and credits
-USDC to the funder/maker address.
+NegRiskAdapter contract.
 
-This module handles the actual on-chain transaction submission and
-confirmation. It is called by the live_reconciler when a winning
-position is detected.
+For proxy wallets (signature_type=2), conditional tokens are held by
+the funder/proxy address, NOT the signer EOA. The redemption must be
+routed THROUGH the proxy contract:
+
+    signer EOA → proxy.execute(negRiskAdapter, redeemPositions_calldata)
+
+This makes msg.sender at the NegRiskAdapter level be the proxy/funder
+(which holds the tokens), not the signer EOA.
 
 Requirements:
 - web3 (pip install web3)
 - POLYMARKET_PRIVATE_KEY in env
+- POLYMARKET_FUNDER in env (for proxy wallets)
 - Polygon RPC endpoint
 - Sufficient MATIC for gas (~0.001-0.01 MATIC per redemption)
 """
@@ -28,17 +33,17 @@ log = get_logger("onchain_redeem")
 
 # --- Contract addresses on Polygon mainnet ---
 NEG_RISK_ADAPTER = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
-CTF_EXCHANGE = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+GNOSIS_CTF = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 
-# Default Polygon RPC (public, rate-limited — override via env for production)
+# Default Polygon RPC (public, rate-limited — override via POLYGON_RPC_URL)
 DEFAULT_POLYGON_RPC = "https://polygon-rpc.com"
 
-# NegRiskAdapter ABI fragment — only the redeemPositions function
+# NegRiskAdapter.redeemPositions(bytes32 conditionId, uint256[] indexSets)
 NEG_RISK_REDEEM_ABI = [
     {
         "inputs": [
             {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"},
-            {"internalType": "uint256[]", "name": "amounts", "type": "uint256[]"},
+            {"internalType": "uint256[]", "name": "indexSets", "type": "uint256[]"},
         ],
         "name": "redeemPositions",
         "outputs": [],
@@ -47,8 +52,22 @@ NEG_RISK_REDEEM_ABI = [
     }
 ]
 
-# CTF redeemPositions ABI fragment (fallback for non-neg-risk markets)
-CTF_REDEEM_ABI = [
+# Polymarket proxy wallet execute(address to, bytes data)
+PROXY_WALLET_ABI = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "to", "type": "address"},
+            {"internalType": "bytes", "name": "data", "type": "bytes"},
+        ],
+        "name": "execute",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# Gnosis CTF.redeemPositions (fallback for non-neg-risk)
+GNOSIS_CTF_REDEEM_ABI = [
     {
         "inputs": [
             {"internalType": "address", "name": "collateralToken", "type": "address"},
@@ -63,9 +82,7 @@ CTF_REDEEM_ABI = [
     }
 ]
 
-# USDC on Polygon (bridged)
 USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-# Zero parent collection for top-level conditions
 ZERO_PARENT = b"\x00" * 32
 
 
@@ -75,24 +92,26 @@ class OnchainRedeemer:
     def __init__(self):
         self._w3 = None
         self._account = None
-        self._neg_risk_contract = None
-        self._ctf_contract = None
         self._funder = None
+        self._is_proxy = False
+        self._neg_risk_contract = None
+        self._proxy_contract = None
         self._ready = False
         self._init_error: Optional[str] = None
 
     def initialize(self) -> bool:
-        """Initialize web3 connection and contracts.
-
-        Returns True if ready for on-chain redemption.
-        """
+        """Initialize web3 connection and contracts."""
         try:
             from web3 import Web3
-            from web3.middleware import geth_poa_middleware
         except ImportError:
             self._init_error = "web3 not installed. Run: pip install web3"
             log.error(f"[REDEEM] {self._init_error}")
             return False
+
+        try:
+            from web3.middleware import geth_poa_middleware
+        except ImportError:
+            geth_poa_middleware = None
 
         private_key = os.getenv("POLYMARKET_PRIVATE_KEY")
         if not private_key:
@@ -104,11 +123,11 @@ class OnchainRedeemer:
 
         try:
             self._w3 = Web3(Web3.HTTPProvider(rpc_url))
-            # Polygon is a PoA chain — need the middleware
-            try:
-                self._w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-            except Exception:
-                pass  # Some web3 versions handle this differently
+            if geth_poa_middleware:
+                try:
+                    self._w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+                except Exception:
+                    pass
 
             if not self._w3.is_connected():
                 self._init_error = f"Cannot connect to Polygon RPC: {rpc_url}"
@@ -116,17 +135,24 @@ class OnchainRedeemer:
                 return False
 
             self._account = self._w3.eth.account.from_key(private_key)
-            self._funder = os.getenv("POLYMARKET_FUNDER") or self._account.address
+            funder_env = os.getenv("POLYMARKET_FUNDER")
+            self._funder = funder_env or self._account.address
+            self._is_proxy = (
+                funder_env is not None
+                and funder_env.lower() != self._account.address.lower()
+            )
 
             # Build contract instances
             self._neg_risk_contract = self._w3.eth.contract(
                 address=Web3.to_checksum_address(NEG_RISK_ADAPTER),
                 abi=NEG_RISK_REDEEM_ABI,
             )
-            self._ctf_contract = self._w3.eth.contract(
-                address=Web3.to_checksum_address(CTF_EXCHANGE),
-                abi=CTF_REDEEM_ABI,
-            )
+
+            if self._is_proxy:
+                self._proxy_contract = self._w3.eth.contract(
+                    address=Web3.to_checksum_address(self._funder),
+                    abi=PROXY_WALLET_ABI,
+                )
 
             chain_id = self._w3.eth.chain_id
             balance_wei = self._w3.eth.get_balance(self._account.address)
@@ -137,11 +163,11 @@ class OnchainRedeemer:
             log.warning(f"[REDEEM]   chain_id={chain_id}")
             log.warning(f"[REDEEM]   signer={self._account.address}")
             log.warning(f"[REDEEM]   funder={self._funder}")
+            log.warning(f"[REDEEM]   is_proxy={self._is_proxy}")
             log.warning(f"[REDEEM]   matic_balance={balance_matic:.4f}")
-            log.warning(f"[REDEEM]   neg_risk_adapter={NEG_RISK_ADAPTER}")
 
             if balance_matic < 0.001:
-                log.warning(f"[REDEEM]   WARNING: MATIC balance very low ({balance_matic:.6f}) — may not cover gas")
+                log.warning(f"[REDEEM]   WARNING: low MATIC ({balance_matic:.6f})")
 
             self._ready = True
             return True
@@ -155,26 +181,17 @@ class OnchainRedeemer:
     def is_ready(self) -> bool:
         return self._ready
 
-    def redeem(self, condition_id: str, neg_risk: bool = True) -> dict:
+    def redeem(self, condition_id: str) -> dict:
         """Submit an on-chain redemption transaction.
 
-        Args:
-            condition_id: Hex string condition ID of the resolved market.
-            neg_risk: If True, use NegRiskAdapter. If False, use CTF directly.
-
-        Returns:
-            dict with:
-                success: bool
-                tx_hash: str or None
-                error: str or None
-                gas_used: int or None
+        For proxy wallets: routes through proxy.execute()
+        For EOA wallets: calls NegRiskAdapter directly
         """
         if not self._ready:
             return {"success": False, "tx_hash": None,
                     "error": self._init_error or "redeemer not initialized",
                     "gas_used": None}
 
-        # Normalize condition_id to bytes32
         cond_bytes = _to_bytes32(condition_id)
         if cond_bytes is None:
             return {"success": False, "tx_hash": None,
@@ -183,14 +200,14 @@ class OnchainRedeemer:
 
         log.warning(
             f"[REDEEM] TX SUBMITTING: condition={condition_id[:18]}... "
-            f"neg_risk={neg_risk} signer={self._account.address[:12]}..."
+            f"proxy={self._is_proxy} signer={self._account.address[:12]}..."
         )
 
         try:
-            if neg_risk:
-                result = self._redeem_neg_risk(cond_bytes)
+            if self._is_proxy:
+                result = self._redeem_via_proxy(cond_bytes)
             else:
-                result = self._redeem_ctf(cond_bytes)
+                result = self._redeem_direct(cond_bytes)
 
             if result["success"]:
                 log.warning(
@@ -207,40 +224,40 @@ class OnchainRedeemer:
             return {"success": False, "tx_hash": None,
                     "error": str(e), "gas_used": None}
 
-    def _redeem_neg_risk(self, cond_bytes: bytes) -> dict:
-        """Redeem via NegRiskAdapter.redeemPositions(conditionId, amounts).
+    def _redeem_via_proxy(self, cond_bytes: bytes) -> dict:
+        """Route redemption through the proxy wallet contract.
 
-        For binary markets, amounts = [amount] where amount is the
-        position size. We pass [0] to let the contract determine
-        the redemption amount from the caller's balance.
+        Calls: proxy.execute(negRiskAdapter, redeemPositions_calldata)
+        This makes msg.sender at the NegRiskAdapter = proxy/funder address.
         """
         from web3 import Web3
 
-        # Build the transaction
-        # amounts = [] means "redeem all" in many implementations
-        # Some implementations require explicit amounts — try empty first
-        tx = self._neg_risk_contract.functions.redeemPositions(
-            cond_bytes,
-            [],  # empty = redeem all available
+        # Encode the inner redeemPositions call
+        redeem_calldata = self._neg_risk_contract.encodeABI(
+            fn_name="redeemPositions",
+            args=[cond_bytes, [1, 2]],
+        )
+
+        # Wrap in proxy.execute(to, data)
+        tx = self._proxy_contract.functions.execute(
+            Web3.to_checksum_address(NEG_RISK_ADAPTER),
+            bytes.fromhex(redeem_calldata[2:]),  # strip 0x prefix
         ).build_transaction({
             "from": self._account.address,
             "nonce": self._w3.eth.get_transaction_count(self._account.address),
-            "gas": 300_000,
+            "gas": 400_000,
             "gasPrice": self._w3.eth.gas_price,
             "chainId": 137,
         })
 
+        log.info(f"[REDEEM] Routing through proxy {self._funder[:12]}... → NegRiskAdapter")
         return self._sign_and_send(tx)
 
-    def _redeem_ctf(self, cond_bytes: bytes) -> dict:
-        """Redeem via CTF.redeemPositions(collateral, parent, condition, indexSets)."""
-        from web3 import Web3
-
-        tx = self._ctf_contract.functions.redeemPositions(
-            Web3.to_checksum_address(USDC_POLYGON),
-            ZERO_PARENT,
+    def _redeem_direct(self, cond_bytes: bytes) -> dict:
+        """Direct call to NegRiskAdapter (for EOA wallets where signer = funder)."""
+        tx = self._neg_risk_contract.functions.redeemPositions(
             cond_bytes,
-            [1, 2],  # Both outcome slots for binary markets
+            [1, 2],
         ).build_transaction({
             "from": self._account.address,
             "nonce": self._w3.eth.get_transaction_count(self._account.address),
@@ -252,14 +269,13 @@ class OnchainRedeemer:
         return self._sign_and_send(tx)
 
     def _sign_and_send(self, tx: dict) -> dict:
-        """Sign a transaction, send it, wait for receipt."""
+        """Sign, send, wait for receipt."""
         signed = self._w3.eth.account.sign_transaction(tx, self._account.key)
         tx_hash = self._w3.eth.send_raw_transaction(signed.raw_transaction)
         tx_hash_hex = tx_hash.hex() if isinstance(tx_hash, bytes) else str(tx_hash)
 
         log.info(f"[REDEEM] TX SUBMITTED: {tx_hash_hex}")
 
-        # Wait for receipt (timeout 60s)
         receipt = self._w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
 
         if receipt["status"] == 1:
@@ -273,7 +289,7 @@ class OnchainRedeemer:
             return {
                 "success": False,
                 "tx_hash": tx_hash_hex,
-                "error": f"TX reverted (status=0)",
+                "error": "TX reverted (status=0)",
                 "gas_used": receipt.get("gasUsed"),
             }
 
@@ -286,7 +302,6 @@ def _to_bytes32(hex_str: str) -> Optional[bytes]:
         clean = hex_str.strip()
         if clean.startswith("0x") or clean.startswith("0X"):
             clean = clean[2:]
-        # Pad to 64 hex chars (32 bytes)
         clean = clean.zfill(64)
         return bytes.fromhex(clean)
     except (ValueError, TypeError):

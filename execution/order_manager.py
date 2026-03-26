@@ -270,11 +270,34 @@ class OrderManager:
             return "No Down token_id available — cannot map direction to token"
 
         # Position limits — controlled multi-entry
+        # Count filled open positions for this market
         market_positions = self._pm.count_positions_for_market(signal.market_id)
-        if market_positions >= config.MAX_ENTRIES_PER_WINDOW:
-            return f"Max entries per window reached ({config.MAX_ENTRIES_PER_WINDOW})"
+        # In live mode, also count LIVE (accepted but not yet filled) orders
+        # toward the cap to prevent overstacking while fills are pending
+        live_pending = 0
+        if config.EXECUTION_MODE == "live":
+            live_pending = sum(
+                1 for o in self._order_history
+                if o.status == "LIVE"
+                and o.execution_mode == "live"
+                and o.market_id == signal.market_id
+            )
+        total_market_entries = market_positions + live_pending
+        if total_market_entries >= config.MAX_ENTRIES_PER_WINDOW:
+            if live_pending > 0:
+                log.warning(
+                    f"[LIVE] WINDOW CAP BLOCK: refusing entry for exact market window "
+                    f"{signal.market_id} ({total_market_entries}/{config.MAX_ENTRIES_PER_WINDOW}: "
+                    f"{market_positions} filled + {live_pending} pending)"
+                )
+            return f"Max entries per window reached ({total_market_entries}/{config.MAX_ENTRIES_PER_WINDOW})"
 
-        if self._pm.count_open_positions() >= config.MAX_CONCURRENT_POSITIONS:
+        total_open = self._pm.count_open_positions() + (
+            sum(1 for o in self._order_history
+                if o.status == "LIVE" and o.execution_mode == "live")
+            if config.EXECUTION_MODE == "live" else 0
+        )
+        if total_open >= config.MAX_CONCURRENT_POSITIONS:
             return f"Max concurrent positions reached ({config.MAX_CONCURRENT_POSITIONS})"
 
         # Capital check

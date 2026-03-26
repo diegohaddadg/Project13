@@ -427,10 +427,10 @@ class LiveReconciler:
 
         Returns True only if redemption is confirmed successful.
         """
-        # Attempt 1: On-chain NegRiskAdapter redemption (the correct path)
+        # On-chain redemption via NegRiskAdapter (routed through proxy for proxy wallets)
         if self._ensure_onchain_redeemer():
             try:
-                result = self._onchain_redeemer.redeem(condition_id, neg_risk=True)
+                result = self._onchain_redeemer.redeem(condition_id)
                 if result["success"]:
                     pos.metadata["redeem_tx_hash"] = result["tx_hash"]
                     pos.metadata["redeem_gas_used"] = result.get("gas_used")
@@ -440,46 +440,14 @@ class LiveReconciler:
                     )
                     return True
                 else:
-                    log.warning(f"[RECON] NegRisk redeem failed: {result['error']}")
-                    # If NegRisk failed, try CTF direct as fallback
-                    result2 = self._onchain_redeemer.redeem(condition_id, neg_risk=False)
-                    if result2["success"]:
-                        pos.metadata["redeem_tx_hash"] = result2["tx_hash"]
-                        pos.metadata["redeem_gas_used"] = result2.get("gas_used")
-                        log.warning(
-                            f"[RECON] REDEEM TX CONFIRMED (CTF fallback): tx={result2['tx_hash']}"
-                        )
-                        return True
-                    else:
-                        log.warning(f"[RECON] CTF fallback also failed: {result2['error']}")
+                    log.warning(f"[RECON] On-chain redeem failed: {result['error']}")
+                    if result.get("tx_hash"):
+                        pos.metadata["redeem_failed_tx"] = result["tx_hash"]
             except Exception as e:
                 log.warning(f"[RECON] On-chain redeem exception: {e}")
 
-        # Attempt 2: py-clob-client redeem method (if it exists)
-        if hasattr(self._client, 'redeem'):
-            try:
-                resp = self._client.redeem(condition_id=condition_id)
-                if resp:
-                    log.info(f"[RECON] Redemption via client.redeem() succeeded")
-                    return True
-            except Exception as e:
-                log.warning(f"[RECON] client.redeem() failed: {e}")
-
-        # Attempt 3: py-clob-client merge_positions
-        if hasattr(self._client, 'merge_positions'):
-            try:
-                token_id = pos.metadata.get("token_id", "")
-                resp = self._client.merge_positions(
-                    condition_id=condition_id, token_id=token_id,
-                )
-                if resp:
-                    log.info(f"[RECON] Redemption via merge_positions() succeeded")
-                    return True
-            except Exception as e:
-                log.warning(f"[RECON] merge_positions() failed: {e}")
-
         log.warning(
-            f"[RECON] All redemption methods failed for {condition_id[:16]}. "
+            f"[RECON] Redemption failed for {condition_id[:16]}. "
             f"Position will be marked CLAIMABLE."
         )
         return False

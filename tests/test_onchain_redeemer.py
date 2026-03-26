@@ -77,7 +77,7 @@ class TestOnchainRedeemerInit(unittest.TestCase):
 class TestOnchainRedeemerRedeem(unittest.TestCase):
     """Test redemption execution with mocked web3."""
 
-    def _make_ready_redeemer(self):
+    def _make_ready_redeemer(self, is_proxy=True):
         """Create a redeemer with mocked web3 internals."""
         redeemer = OnchainRedeemer()
         redeemer._ready = True
@@ -89,18 +89,30 @@ class TestOnchainRedeemerRedeem(unittest.TestCase):
 
         redeemer._w3 = mock_w3
         redeemer._account = mock_account
-        redeemer._funder = "0xTestFunder"
+        redeemer._funder = "0xTestFunder" if is_proxy else "0xTestSigner"
+        redeemer._is_proxy = is_proxy
 
-        # Mock contract
-        mock_contract = MagicMock()
+        # Mock NegRisk contract (for encodeABI and direct calls)
+        mock_neg_risk = MagicMock()
         mock_fn = MagicMock()
         mock_fn.build_transaction.return_value = {
             "from": "0xTestSigner", "nonce": 0, "gas": 300000,
             "gasPrice": 30000000000, "chainId": 137,
         }
-        mock_contract.functions.redeemPositions.return_value = mock_fn
-        redeemer._neg_risk_contract = mock_contract
-        redeemer._ctf_contract = mock_contract
+        mock_neg_risk.functions.redeemPositions.return_value = mock_fn
+        mock_neg_risk.encodeABI.return_value = "0xdeadbeef"
+        redeemer._neg_risk_contract = mock_neg_risk
+
+        # Mock proxy contract (for proxy wallets)
+        if is_proxy:
+            mock_proxy = MagicMock()
+            mock_proxy_fn = MagicMock()
+            mock_proxy_fn.build_transaction.return_value = {
+                "from": "0xTestSigner", "nonce": 0, "gas": 400000,
+                "gasPrice": 30000000000, "chainId": 137,
+            }
+            mock_proxy.functions.execute.return_value = mock_proxy_fn
+            redeemer._proxy_contract = mock_proxy
 
         return redeemer
 
@@ -123,7 +135,7 @@ class TestOnchainRedeemerRedeem(unittest.TestCase):
         }
 
         with self._patch_web3_import():
-            result = redeemer.redeem("0x" + "ab" * 32, neg_risk=True)
+            result = redeemer.redeem("0x" + "ab" * 32)
 
         self.assertTrue(result["success"])
         self.assertIsNotNone(result["tx_hash"])
@@ -142,7 +154,7 @@ class TestOnchainRedeemerRedeem(unittest.TestCase):
         }
 
         with self._patch_web3_import():
-            result = redeemer.redeem("0x" + "ab" * 32, neg_risk=True)
+            result = redeemer.redeem("0x" + "ab" * 32)
 
         self.assertFalse(result["success"])
         self.assertIn("reverted", result["error"])
@@ -164,7 +176,7 @@ class TestOnchainRedeemerRedeem(unittest.TestCase):
         redeemer = self._make_ready_redeemer()
         redeemer._w3.eth.account.sign_transaction.side_effect = Exception("RPC timeout")
 
-        result = redeemer.redeem("0x" + "ab" * 32, neg_risk=True)
+        result = redeemer.redeem("0x" + "ab" * 32)
 
         self.assertFalse(result["success"])
         self.assertIsNone(result["tx_hash"])

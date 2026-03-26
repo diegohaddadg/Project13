@@ -270,10 +270,17 @@ class TestRedemptionDetection(unittest.TestCase):
                 {"token_id": "tok_loser", "winner": 0.0},
             ],
         }
-        # Redemption method exists and succeeds
-        client.redeem = MagicMock(return_value={"success": True})
 
         recon = LiveReconciler(client, pm, om)
+        # Mock on-chain redeemer that succeeds
+        mock_redeemer = MagicMock()
+        mock_redeemer.is_ready = True
+        mock_redeemer.redeem.return_value = {
+            "success": True, "tx_hash": "0xtx_success", "error": None, "gas_used": 150000,
+        }
+        recon._onchain_redeemer = mock_redeemer
+        recon._onchain_redeemer_init_attempted = True
+
         summary = recon.reconcile()
 
         self.assertEqual(summary["redemptions_this_cycle"], 1)
@@ -281,6 +288,8 @@ class TestRedemptionDetection(unittest.TestCase):
         closed = pm.get_closed_positions()
         self.assertEqual(len(closed), 1)
         self.assertGreater(closed[0].pnl, 0)
+        self.assertTrue(closed[0].metadata.get("redeemed"))
+        self.assertEqual(closed[0].metadata.get("redeem_tx_hash"), "0xtx_success")
 
     @patch.object(config, "EXECUTION_MODE", "live")
     @patch.object(config, "LIVE_RECONCILIATION_ENABLED", True)
