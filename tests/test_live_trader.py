@@ -195,9 +195,18 @@ class TestLiveTraderSubmission(unittest.TestCase):
     """Test real order submission with mocked CLOB client."""
 
     def _make_ready_trader(self):
-        """Create a LiveTrader with a mocked CLOB client."""
+        """Create a LiveTrader with a mocked CLOB client and fresh reconciler."""
         trader = LiveTrader()
         trader._clob_client = MagicMock()
+        # Attach a fresh reconciler so entry cap gate passes
+        from execution.live_reconciler import LiveReconciler
+        from execution.position_manager import PositionManager
+        mock_om = MagicMock()
+        mock_om.get_order_history.return_value = []
+        recon = LiveReconciler(MagicMock(), PositionManager(), mock_om)
+        recon._stale = False
+        recon._last_reconcile_ts = time.time()
+        trader.set_reconciler(recon)
         return trader
 
     def _patch_clob_imports(self):

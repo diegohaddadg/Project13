@@ -409,6 +409,9 @@ class StateAdapter:
             "risk": self.get_risk_snapshot(),
             "health": self.get_health_snapshot(),
         }
+        # Add live reconciliation status if available
+        if config.EXECUTION_MODE == "live" and self._om.live_reconciler:
+            snap["reconciliation"] = self._om.live_reconciler.get_status()
         self._maybe_append_dashboard_truth_trace(snap)
         self._maybe_append_market_timing_truth_trace(snap)
         return snap

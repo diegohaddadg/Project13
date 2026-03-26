@@ -35,9 +35,14 @@ class LiveTrader:
 
     def __init__(self):
         self._clob_client = None
+        self._reconciler = None  # Set via set_reconciler() after init
         self._init_error: Optional[str] = None
         self._orders_submitted: int = 0
         self._orders_failed: int = 0
+
+    def set_reconciler(self, reconciler) -> None:
+        """Attach the live reconciler for exchange-truth entry gating."""
+        self._reconciler = reconciler
 
     def initialize(self) -> bool:
         """Initialize the authenticated CLOB client.
@@ -85,6 +90,11 @@ class LiveTrader:
     @property
     def is_ready(self) -> bool:
         return self._clob_client is not None
+
+    @property
+    def clob_client(self):
+        """Expose CLOB client for reconciliation layer."""
+        return self._clob_client
 
     def execute(self, order: Order, market_snapshot: Optional[MarketState] = None) -> Order:
         """Submit a live order after verifying all safety gates."""
@@ -146,8 +156,79 @@ class LiveTrader:
                 f"CLOB client not initialized: {self._init_error or 'call initialize() first'}"
             )
 
+        # --- HARD LIVE ENTRY CAP (exchange-truth gating) ---
+        cap_rejection = self._check_live_entry_cap(order)
+        if cap_rejection:
+            return self._reject(order, cap_rejection)
+
         # --- All gates passed — submit to CLOB ---
         return self._submit_clob_order(order)
+
+    def _check_live_entry_cap(self, order: Order) -> Optional[str]:
+        """Hard live entry cap using exchange-truth state.
+
+        Returns rejection reason string, or None if entry is allowed.
+        Fail-closed: if reconciliation is unavailable or stale, block entry.
+        """
+        # Gate A: reconciler must exist and not be stale
+        if self._reconciler is None:
+            return (
+                "BLOCKED: no live reconciler — cannot verify market exposure. "
+                "Refusing new live entry."
+            )
+
+        if self._reconciler._stale:
+            return (
+                "BLOCKED: reconciliation stale (no successful sync yet). "
+                "Refusing new live entry until exchange state is confirmed."
+            )
+
+        # Check reconciliation freshness (stale if > 30s since last sync)
+        recon_age = time.time() - self._reconciler._last_reconcile_ts
+        if self._reconciler._last_reconcile_ts > 0 and recon_age > 30.0:
+            return (
+                f"BLOCKED: reconciliation data is {recon_age:.0f}s old (>30s). "
+                f"Refusing new live entry until fresh sync."
+            )
+
+        # Gate B: get exposure for this market
+        exposure = self._reconciler.get_live_market_exposure(order.market_id)
+
+        total = exposure["total_entries"]
+        cap = config.MAX_ENTRIES_PER_WINDOW
+
+        # Gate C: hard cap on entries per market window
+        if total >= cap:
+            log.warning(
+                f"[LIVE] BLOCKED: market entry cap reached for {order.market_id} "
+                f"({total}/{cap}: {exposure['pending_orders']} pending + "
+                f"{exposure['open_positions']} filled)"
+            )
+            return (
+                f"BLOCKED: market entry cap reached ({total}/{cap} entries: "
+                f"{exposure['pending_orders']} pending + {exposure['open_positions']} filled)"
+            )
+
+        # Gate D: duplicate direction block
+        if order.direction in exposure["active_directions"]:
+            log.warning(
+                f"[LIVE] BLOCKED: duplicate direction {order.direction} already "
+                f"open/pending for {order.market_id} "
+                f"(UP={exposure['up_count']} DOWN={exposure['down_count']})"
+            )
+            return (
+                f"BLOCKED: duplicate direction {order.direction} already open/pending "
+                f"for this market window (UP={exposure['up_count']} DOWN={exposure['down_count']})"
+            )
+
+        # All caps passed — log exposure state for audit trail
+        log.info(
+            f"[LIVE] Entry cap check PASSED: {order.market_id} "
+            f"entries={total}/{cap} direction={order.direction} "
+            f"pending={exposure['pending_orders']} filled={exposure['open_positions']} "
+            f"capital=${exposure['total_capital']:.2f}"
+        )
+        return None
 
     def _submit_clob_order(self, order: Order) -> Order:
         """Build and submit a limit order to Polymarket CLOB."""

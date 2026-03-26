@@ -168,6 +168,13 @@ STARTING_CAPITAL_USDC = float(os.getenv("STARTING_CAPITAL_USDC", "100.0"))
 RESOLUTION_POLL_INTERVAL_SECONDS = 5
 TRADE_LOG_PATH = "logs/trade_log.jsonl"
 
+# --- Live Reconciliation ---
+LIVE_RECONCILIATION_ENABLED = os.getenv("LIVE_RECONCILIATION_ENABLED", "true").lower() == "true"
+LIVE_AUTO_REDEEM_ENABLED = os.getenv("LIVE_AUTO_REDEEM_ENABLED", "true").lower() == "true"
+LIVE_RECONCILE_INTERVAL_SECONDS = float(os.getenv("LIVE_RECONCILE_INTERVAL_SECONDS", "5.0"))
+LIVE_REDEEM_RETRY_BACKOFF_SECONDS = 30.0
+LIVE_REDEEM_MAX_RETRIES = 5
+
 # --- Risk Engine (Phase 5) ---
 
 # Drawdown protection (fraction of high-water mark equity)

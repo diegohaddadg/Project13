@@ -203,6 +203,7 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
     print("\n" * DASHBOARD_LINES, end="", flush=True)
     last_res_check = 0.0
     last_report = time.time()
+    last_recon_check = 0.0
 
     while True:
         tick = agg.get_current_price()
@@ -288,6 +289,19 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
                 _log_trace(trace)
 
             now = time.time()
+
+            # Live reconciliation: poll exchange for fills / cancels / redemptions
+            if (config.EXECUTION_MODE == "live"
+                    and om.live_reconciler is not None
+                    and now - last_recon_check >= config.LIVE_RECONCILE_INTERVAL_SECONDS):
+                last_recon_check = now
+                recon = om.live_reconciler.reconcile()
+                # Feed resolved positions from reconciler into risk tracking
+                if recon.get("fills_this_cycle", 0) > 0:
+                    for pos in pm.get_closed_positions()[-recon["fills_this_cycle"]:]:
+                        if pos.pnl is not None:
+                            rm.record_trade_result(pos)
+
             if now - last_res_check >= config.RESOLUTION_POLL_INTERVAL_SECONDS:
                 last_res_check = now
                 m5 = agg.get_current_market("btc-5min")

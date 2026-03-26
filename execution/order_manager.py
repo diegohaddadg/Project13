@@ -47,13 +47,42 @@ class OrderManager:
 
         self._load_trade_log()
 
+        # Live reconciler (initialized after live trader succeeds)
+        self._live_reconciler = None
+
         # Initialize live trader if in live mode
         if config.EXECUTION_MODE == "live":
-            if not self._live_trader.initialize():
+            if self._live_trader.initialize():
+                self._init_live_reconciler()
+            else:
                 log.error(
                     "[LIVE] Live trader initialization FAILED — "
                     "live orders will be rejected until credentials are fixed"
                 )
+
+    def _init_live_reconciler(self) -> None:
+        """Initialize the live reconciliation layer."""
+        if not config.LIVE_RECONCILIATION_ENABLED:
+            log.info("[LIVE] Reconciliation disabled by config")
+            return
+        try:
+            from execution.live_reconciler import LiveReconciler
+            self._live_reconciler = LiveReconciler(
+                clob_client=self._live_trader.clob_client,
+                position_manager=self._pm,
+                order_manager=self,
+            )
+            # Wire reconciler into live trader for entry cap gating
+            self._live_trader.set_reconciler(self._live_reconciler)
+            log.warning("[LIVE] Reconciler initialized — running startup sync")
+            self._live_reconciler.startup_sync()
+        except Exception as e:
+            log.error(f"[LIVE] Reconciler init failed: {e}")
+
+    @property
+    def live_reconciler(self):
+        """Expose reconciler for main loop integration."""
+        return self._live_reconciler
 
     # --- Public API ---
 
