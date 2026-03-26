@@ -382,14 +382,14 @@ class OrderManager:
         )
 
     def _calculate_size_usdc(self, signal: TradeSignal) -> float:
-        """Calculate USDC size using current total equity as the sizing base.
+        """Calculate USDC size using risk equity base.
 
         Flow:
-          1. kelly_suggested = total_equity * recommended_size_pct
-          2. pct_cap = total_equity * MAX_ORDER_SIZE_PCT
+          1. kelly_suggested = risk_equity * recommended_size_pct
+          2. pct_cap = risk_equity * MAX_ORDER_SIZE_PCT
           3. Apply ceiling, floor, and free-capital clamp
         """
-        equity = self._pm.get_total_equity()
+        equity = self._pm.get_risk_equity()
         free_capital = self._pm.get_available_capital()
 
         # Step 1: Kelly-suggested size against total equity

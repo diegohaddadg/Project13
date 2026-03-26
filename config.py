@@ -192,6 +192,14 @@ LIVE_RECONCILE_INTERVAL_SECONDS = float(os.getenv("LIVE_RECONCILE_INTERVAL_SECON
 LIVE_REDEEM_RETRY_BACKOFF_SECONDS = 30.0
 LIVE_REDEEM_MAX_RETRIES = 5
 
+# --- Paper-Like Risk Mode (Strategy B) ---
+# When enabled, risk/sizing/exposure calculations use a synthetic baseline
+# instead of actual restored equity. This makes a small live account behave
+# like a $100 paper account for entry aggressiveness, while keeping
+# accounting/reconciliation/dashboard based on real equity.
+PAPER_LIKE_RISK_MODE = os.getenv("PAPER_LIKE_RISK_MODE", "false").lower() == "true"
+PAPER_LIKE_BASELINE_USDC = float(os.getenv("PAPER_LIKE_BASELINE_USDC", "100.0"))
+
 # --- Risk Engine (Phase 5) ---
 
 # Drawdown protection (fraction of high-water mark equity)

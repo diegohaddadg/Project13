@@ -36,8 +36,8 @@ class ExposureTracker:
         )
 
     def get_exposure_pct(self) -> float:
-        """Total exposure as percentage of current total equity."""
-        equity = self._pm.get_total_equity()
+        """Total exposure as percentage of risk equity base."""
+        equity = self._pm.get_risk_equity()
         if equity <= 0:
             return 0.0
         return self.get_total_exposure() / equity
@@ -53,7 +53,7 @@ class ExposureTracker:
         Limits are computed against current total equity (not starting capital),
         so they scale naturally as the account grows.
         """
-        equity = self._pm.get_total_equity()
+        equity = self._pm.get_risk_equity()
 
         # Total exposure check
         new_total = self.get_total_exposure() + new_order_size

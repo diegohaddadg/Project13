@@ -236,7 +236,7 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
 
             for sig in signals:
                 portfolio_state = {
-                    "current_capital": pm.get_total_equity(),
+                    "current_capital": pm.get_risk_equity(),
                     "volatility": vol,
                     "feed_healthy": si.get("feed_healthy", False),
                 }
@@ -396,12 +396,20 @@ async def run():
     analytics = PerformanceAnalytics()
     hm = HealthMonitor(agg)
     rm = RiskManager(pm, ks, exp, analytics, hm)
-    session_equity = pm.get_total_equity()
-    rm.set_session_start_equity(session_equity)
-    # Reset HWM to actual starting equity so drawdown is measured from HERE,
-    # not from stale STARTING_CAPITAL_USDC which may be unreachable after losses.
-    analytics.reset_hwm(session_equity)
-    log.info(f"Session HWM reset to ${session_equity:.2f} (matches restored equity)")
+    actual_equity = pm.get_total_equity()
+    risk_equity = pm.get_risk_equity()
+    rm.set_session_start_equity(risk_equity)
+    analytics.reset_hwm(risk_equity)
+
+    if config.PAPER_LIKE_RISK_MODE:
+        log.warning(
+            f"[RISK] PAPER_LIKE_RISK_MODE enabled "
+            f"baseline=${config.PAPER_LIKE_BASELINE_USDC:.2f} "
+            f"actual_equity=${actual_equity:.2f} "
+            f"effective_risk_base=${risk_equity:.2f}"
+        )
+    else:
+        log.info(f"Session HWM reset to ${risk_equity:.2f} (matches restored equity)")
 
     log.info(f"Signal engine — strategies: {engine.get_active_strategies()}")
 

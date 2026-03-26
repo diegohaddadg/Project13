@@ -353,6 +353,8 @@ class RiskManager:
             "risk_rejections": self._risk_rejections,
             "hwm": self._analytics._high_water_mark,
             "total_equity": equity,
+            "risk_equity": self._pm.get_risk_equity(),
+            "paper_like_risk_mode": config.PAPER_LIKE_RISK_MODE,
             "free_capital": free_capital,
             "trading_allowed": trading_allowed,
             "paper_warn_only": self._paper_warn_only(),
