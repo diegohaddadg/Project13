@@ -34,7 +34,7 @@ class Order:
     size_usdc: float = 0.0         # Total USDC commitment
     num_shares: float = 0.0        # size_usdc / price (rounded)
     order_type: str = "LIMIT"      # "LIMIT" | "MARKET"
-    status: str = "PENDING"        # PENDING|SUBMITTED|FILLED|PARTIAL|CANCELLED|FAILED|REJECTED
+    status: str = "PENDING"        # PENDING|SUBMITTED|LIVE|FILLED|PARTIAL|CANCELLED|FAILED|REJECTED
     fill_price: Optional[float] = None
     fill_timestamp: Optional[float] = None
     pnl: Optional[float] = None

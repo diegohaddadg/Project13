@@ -47,6 +47,14 @@ class OrderManager:
 
         self._load_trade_log()
 
+        # Initialize live trader if in live mode
+        if config.EXECUTION_MODE == "live":
+            if not self._live_trader.initialize():
+                log.error(
+                    "[LIVE] Live trader initialization FAILED — "
+                    "live orders will be rejected until credentials are fixed"
+                )
+
     # --- Public API ---
 
     def execute_signal(

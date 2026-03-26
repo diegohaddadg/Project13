@@ -53,13 +53,18 @@ def get_clob_client(authenticated: bool = False):
             "Set it in .env"
         )
 
+    funder = os.getenv("POLYMARKET_FUNDER")
+    sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))  # 0=EOA
+
     log.info("Creating authenticated CLOB client")
     # Never log the private key
-    client = ClobClient(
-        host=CLOB_HOST,
-        key=private_key,
-        chain_id=CHAIN_ID,
-    )
+    kwargs = dict(host=CLOB_HOST, key=private_key, chain_id=CHAIN_ID)
+    if funder:
+        kwargs["funder"] = funder
+        kwargs["signature_type"] = sig_type
+        log.info(f"Using funder address: {funder[:10]}...{funder[-6:]}")
+
+    client = ClobClient(**kwargs)
 
     # Derive or load API credentials (L2 auth)
     api_key = os.getenv("POLYMARKET_API_KEY")
@@ -85,3 +90,25 @@ def get_clob_client(authenticated: bool = False):
             raise
 
     return client
+
+
+def validate_live_credentials() -> tuple[bool, list[str]]:
+    """Check if all required live trading credentials are present.
+
+    Returns:
+        (all_present, list_of_missing_var_names)
+    """
+    required = ["POLYMARKET_PRIVATE_KEY"]
+    # API creds can be derived, but if any are set, all three must be
+    api_vars = ["POLYMARKET_API_KEY", "POLYMARKET_API_SECRET", "POLYMARKET_PASSPHRASE"]
+    api_set = [v for v in api_vars if os.getenv(v)]
+
+    missing = [v for v in required if not os.getenv(v)]
+
+    # If some but not all API creds are set, flag the missing ones
+    if 0 < len(api_set) < 3:
+        for v in api_vars:
+            if not os.getenv(v):
+                missing.append(v)
+
+    return (len(missing) == 0, missing)
