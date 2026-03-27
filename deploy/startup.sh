@@ -8,10 +8,13 @@ cd "$PROJECT_DIR"
 
 echo "=== Project13 Startup ==="
 
-# Check virtual environment
-if [ -d "venv" ]; then
+# Check virtual environment (.venv first, then venv fallback)
+if [ -d ".venv" ]; then
+    source .venv/bin/activate
+    echo "[OK] Virtual environment activated: .venv ($VIRTUAL_ENV)"
+elif [ -d "venv" ]; then
     source venv/bin/activate
-    echo "[OK] Virtual environment activated"
+    echo "[OK] Virtual environment activated: venv ($VIRTUAL_ENV)"
 elif [ -n "$VIRTUAL_ENV" ]; then
     echo "[OK] Already in virtual environment: $VIRTUAL_ENV"
 else
@@ -30,7 +33,7 @@ mkdir -p logs
 echo "[OK] Logs directory ready"
 
 # Validate imports
-python3 -c "from main import main; print('[OK] Imports validated')" || {
+python -c "from main import main; print('[OK] Imports validated')" || {
     echo "[ERROR] Import validation failed"
     exit 1
 }
@@ -44,7 +47,7 @@ fi
 
 # Start bot
 echo "[START] Launching Project13..."
-nohup python3 main.py >> logs/bot.log 2>&1 &
+nohup python main.py >> logs/bot.log 2>&1 &
 BOT_PID=$!
 echo "[OK] Bot started with PID $BOT_PID"
 echo "$BOT_PID" > logs/bot.pid
