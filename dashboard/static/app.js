@@ -185,9 +185,24 @@ function renderMarket(el, m) {
   const freshLabel = freshAge < 10 ? 'live' : freshAge < 30 ? `${freshAge.toFixed(0)}s ago` : 'stale';
   const freshCls = freshAge < 10 ? 'green' : freshAge < 30 ? 'yellow' : 'red';
 
-  // Strike display
-  const strikeFmt = m.strike_price > 0 ? `$${m.strike_price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}` : 'N/A';
-  const strikeHtml = `<span class="metric-value accent">${strikeFmt}</span>`;
+  // Strike display with confirmation status
+  const ss = m.strike_status || 'waiting';
+  let strikeFmt, strikeCls;
+  if (ss === 'confirmed' && m.strike_price > 0) {
+    strikeFmt = `$${m.strike_price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+    strikeCls = 'green';
+  } else if (ss === 'timeout') {
+    strikeFmt = 'TIMEOUT';
+    strikeCls = 'red';
+  } else if (m.strike_price > 0) {
+    strikeFmt = `~$${m.strike_price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+    strikeCls = 'yellow';
+  } else {
+    strikeFmt = 'N/A';
+    strikeCls = 'red';
+  }
+  const strikeLabel = ss === 'confirmed' ? ' (confirmed)' : ss === 'timeout' ? ' (skipped)' : ' (waiting...)';
+  const strikeHtml = `<span class="metric-value ${strikeCls}">${strikeFmt}${strikeLabel}</span>`;
 
   // Pre-window row only for plausible short waits (5m/15m); ignore bogus multi-hour values.
   const ttw = m.time_to_window || 0;

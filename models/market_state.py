@@ -57,6 +57,11 @@ class MarketState:
     # How window_started / time_remaining were derived (slug is authoritative for btc-updown-*)
     timing_source: str = ""       # set in feeds/polymarket: slug_period | gamma_end_date | none
 
+    # Strike confirmation state
+    strike_status: str = "waiting"       # "waiting" | "confirmed" | "timeout"
+    strike_source: str = "spot_approx"   # "spot_approx" | "prev_finalPrice" | "oracle"
+    strike_confirmed_at: float = 0.0     # timestamp when strike was confirmed (0 = not confirmed)
+
     def implied_up_probability(self) -> float:
         """Implied probability of BTC finishing up (at or above strike).
 

@@ -108,6 +108,12 @@ class PolymarketFeed:
         self._captured_strikes: dict[str, float] = {}
         # Condition IDs whose strike has been confirmed from oracle priceToBeat
         self._oracle_strike_confirmed: set[str] = set()
+        # Oracle strike source per condition_id (for strike_source field)
+        self._oracle_strike_source: dict[str, str] = {}
+        # Timestamp when oracle strike was confirmed per condition_id
+        self._oracle_strike_confirmed_ts: dict[str, float] = {}
+        # Timestamp when each condition_id's window was first discovered (for timeout)
+        self._window_discovered_at: dict[str, float] = {}
 
         self.poll_count: int = 0
         self.transition_count: int = 0
@@ -258,6 +264,7 @@ class PolymarketFeed:
                         f"ID: {market_data.get('id')} | "
                         f"condition_id: {condition_id}")
                 self._active_condition_ids[market_type] = condition_id
+                self._window_discovered_at[condition_id] = time.time()
 
                 # Capture current BTC spot as strike for this new market
                 # (approximate — replaced by oracle priceToBeat once available)
@@ -534,12 +541,46 @@ class PolymarketFeed:
                 self._captured_strikes[condition_id] = strike_price
 
             is_oracle = condition_id in self._oracle_strike_confirmed
+
+            # --- Strike confirmation state ---
+            if is_oracle:
+                strike_status = "confirmed"
+                strike_source = self._oracle_strike_source.get(condition_id, "oracle")
+                strike_confirmed_at = self._oracle_strike_confirmed_ts.get(condition_id, 0.0)
+            else:
+                discovered_at = self._window_discovered_at.get(condition_id, time.time())
+                waiting_seconds = time.time() - discovered_at
+                if config.REQUIRE_CONFIRMED_STRIKE and waiting_seconds > config.STRIKE_CONFIRMATION_TIMEOUT_S:
+                    strike_status = "timeout"
+                    strike_source = "spot_approx"
+                    strike_confirmed_at = 0.0
+                else:
+                    strike_status = "waiting"
+                    strike_source = "spot_approx"
+                    strike_confirmed_at = 0.0
+
+            # Log strike state
             spot_gap = abs(self._latest_spot_price - strike_price) if self._latest_spot_price > 0 and strike_price > 0 else 0.0
-            log.info(
-                f"[STRIKE] market={market_type} window={slug[:48]} "
-                f"strike=${strike_price:,.2f} spot=${self._latest_spot_price:,.2f} "
-                f"gap=${spot_gap:,.2f} source={'oracle' if is_oracle else 'spot_approx'}"
-            )
+            if strike_status == "waiting":
+                waiting_s = time.time() - self._window_discovered_at.get(condition_id, time.time())
+                log.info(
+                    f"[STRIKE] waiting_for_confirmed market={market_type} "
+                    f"window={slug[:48]} approx_strike=${strike_price:,.2f} "
+                    f"waited={waiting_s:.0f}s timeout={config.STRIKE_CONFIRMATION_TIMEOUT_S:.0f}s "
+                    f"source=prev_finalPrice"
+                )
+            elif strike_status == "timeout":
+                log.warning(
+                    f"[STRIKE] timeout skip_window market={market_type} "
+                    f"window={slug[:48]} waited={waiting_seconds:.0f}s "
+                    f"approx_strike=${strike_price:,.2f} gap=${spot_gap:,.2f}"
+                )
+            else:
+                log.info(
+                    f"[STRIKE] confirmed market={market_type} window={slug[:48]} "
+                    f"strike=${strike_price:,.2f} spot=${self._latest_spot_price:,.2f} "
+                    f"gap=${spot_gap:,.2f} source={strike_source}"
+                )
 
             gamma_tr = self._compute_time_remaining(end_date_str)
             time_remaining, time_to_window, window_started, timing_source = (
@@ -577,11 +618,17 @@ class PolymarketFeed:
             # endregion
 
             # Signalable: market is active, has valid prices and time left in tradable window
+            # When REQUIRE_CONFIRMED_STRIKE is enabled, unconfirmed strikes block signaling
+            strike_ok = (
+                strike_status == "confirmed"
+                or not config.REQUIRE_CONFIRMED_STRIKE
+            )
             is_signalable = (
                 strike_price > 0
                 and yes_price > 0
                 and no_price > 0
                 and time_remaining > 0
+                and strike_ok
             )
 
             return MarketState(
@@ -608,6 +655,9 @@ class PolymarketFeed:
                 is_signalable=is_signalable,
                 time_to_window_seconds=time_to_window,
                 timing_source=timing_source,
+                strike_status=strike_status,
+                strike_source=strike_source,
+                strike_confirmed_at=strike_confirmed_at,
             )
         except Exception as e:
             log.error(f"Failed to build MarketState for {market_type}: {e}")
@@ -736,11 +786,24 @@ class PolymarketFeed:
         gap = abs(oracle_strike - old_strike) if old_strike > 0 else 0.0
         self._captured_strikes[condition_id] = oracle_strike
         self._oracle_strike_confirmed.add(condition_id)
+        now = time.time()
+        self._oracle_strike_confirmed_ts[condition_id] = now
+        # Map source to strike_source enum value
+        if "finalPrice" in source:
+            self._oracle_strike_source[condition_id] = "prev_finalPrice"
+        elif "priceToBeat" in source:
+            self._oracle_strike_source[condition_id] = "oracle"
+        else:
+            self._oracle_strike_source[condition_id] = "oracle"
+
+        discovered_at = self._window_discovered_at.get(condition_id, now)
+        delay = now - discovered_at
 
         log.warning(
-            f"[STRIKE] oracle_confirmed market={market_type} slug={slug[:48]} "
-            f"approx_strike=${old_strike:,.2f} oracle_strike=${oracle_strike:,.2f} "
-            f"gap=${gap:,.2f} source={source}"
+            f"[STRIKE] confirmed value=${oracle_strike:,.2f} "
+            f"source={self._oracle_strike_source[condition_id]} "
+            f"delay={delay:.1f}s market={market_type} "
+            f"slug={slug[:48]} approx_was=${old_strike:,.2f} gap=${gap:,.2f}"
         )
 
     @staticmethod

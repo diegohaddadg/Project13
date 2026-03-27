@@ -311,6 +311,12 @@ if TESTING_MODE:
     SHORT_MARKET_MIN_NET_EV = 0.01
     SNIPER_MIN_NET_EV = 0.015
 
+# --- Strike Confirmation ---
+# When True, markets with unconfirmed strikes are not signalable (no trading).
+# The oracle strike arrives via events API after the previous window resolves.
+REQUIRE_CONFIRMED_STRIKE = _env("REQUIRE_CONFIRMED_STRIKE", "true").lower() == "true"
+STRIKE_CONFIRMATION_TIMEOUT_S = float(_env("STRIKE_CONFIRMATION_TIMEOUT_S", "120"))
+
 # --- Replay / Tape ---
 REPLAY_TAPE_ENABLED = os.getenv("REPLAY_TAPE_ENABLED", "true").lower() == "true"
 REPLAY_TAPE_PATH = "data/live_tape.jsonl"

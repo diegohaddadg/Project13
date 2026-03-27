@@ -155,6 +155,8 @@ class StateAdapter:
             "no_price": state.no_price,
             "spread": state.spread,
             "strike_price": state.strike_price,
+            "strike_status": state.strike_status,
+            "strike_source": state.strike_source,
             "time_remaining": state.time_remaining_seconds,
             "gamma_end_remaining": gamma_end,
             "timing_display_source": timing_src or "observation_window",

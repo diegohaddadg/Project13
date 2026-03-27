@@ -122,7 +122,15 @@ def _mkt_section(state, label, spot, vol, sig):
         lines.append(f"    Edge: Up={_ce(pr['prob_up']-state.yes_price)} Down={_ce(pr['prob_down']-state.no_price)}")
     else:
         lines.append(f"    {D}Model: awaiting data...{RST}")
-    sk = f"${state.strike_price:,.2f}" if state.strike_price > 0 else "N/A"
+    ss = getattr(state, "strike_status", "waiting")
+    if ss == "confirmed":
+        sk = f"{G}${state.strike_price:,.2f} (confirmed){RST}"
+    elif ss == "timeout":
+        sk = f"{R}TIMEOUT (skipped){RST}"
+    elif state.strike_price > 0:
+        sk = f"{Y}~${state.strike_price:,.2f} (waiting...){RST}"
+    else:
+        sk = "N/A"
     sig_tag = f" {G}[LIVE]{RST}" if state.is_signalable else ""
     lines.append(f"    Strike: {sk}  |  Resolves: {_ft(state.time_remaining_seconds)}{sig_tag}")
     if sig:
