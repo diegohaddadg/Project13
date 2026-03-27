@@ -661,49 +661,75 @@ class PolymarketFeed:
     async def _try_update_strike_from_oracle(
         self, condition_id: str, slug: str, market_type: str
     ) -> None:
-        """Check the Gamma events API for the real oracle priceToBeat.
+        """Try to replace the approximate strike with the real oracle priceToBeat.
 
-        The events endpoint exposes eventMetadata.priceToBeat once the Chainlink
-        oracle records the BTC price at the window start. This is the true strike
-        — our initial capture from Coinbase spot is an approximation that can be
-        $10-50 off if there was any delay in market discovery.
+        Checks two sources (in order):
+        1. priceToBeat on the CURRENT window's event — available ~150s after close
+        2. finalPrice on the PREVIOUS window's event — available ~320-385s after
+           prev close (= ~20-85s after current close). Since priceToBeat[N] ==
+           finalPrice[N-1], this is the same value via a different path.
 
-        This method is idempotent: once priceToBeat is confirmed, further calls
-        are no-ops.
+        Timing reality for 5-minute BTC up/down markets:
+        - True oracle strike is the Chainlink Data Streams BTC/USD price at
+          eventStartTime (window open).
+        - Polymarket does NOT publish this value until AFTER the window closes.
+        - priceToBeat appears on the events API ~150s after window close.
+        - finalPrice of previous window appears ~320-385s after prev close.
+        - For a 5-min window, NEITHER source is available during trading.
+        - For a 15-min window, the oracle strike arrives ~5-7 min in (usable).
+        - Until oracle arrives, we use Coinbase BTC/USD spot at market discovery
+          as an approximation (typical error: $4-50 depending on discovery lag).
+
+        This method is idempotent: once oracle strike is confirmed, further polls
+        are no-ops for this condition_id.
         """
         if condition_id in self._oracle_strike_confirmed:
             return
         if not slug or not self._session or self._session.closed:
             return
 
+        oracle_strike = None
+        source = ""
+
+        # --- Source 1: priceToBeat on the current window's event ---
         url = f"{config.POLYMARKET_GAMMA_API_URL}/events"
         try:
             async with self._session.get(
                 url, params={"slug": slug, "limit": "1"}
             ) as resp:
-                if resp.status != 200:
-                    return
-                data = await resp.json()
+                if resp.status == 200:
+                    data = await resp.json()
+                    if isinstance(data, list) and data:
+                        em = data[0].get("eventMetadata")
+                        if isinstance(em, dict):
+                            ptb = em.get("priceToBeat")
+                            if ptb is not None:
+                                oracle_strike = float(ptb)
+                                source = "events_api_priceToBeat"
         except Exception:
-            return
+            pass
 
-        if not isinstance(data, list) or not data:
-            return
+        # --- Source 2: finalPrice of the previous window ---
+        if oracle_strike is None:
+            prev_slug = self._prev_window_slug(slug)
+            if prev_slug:
+                try:
+                    async with self._session.get(
+                        url, params={"slug": prev_slug, "limit": "1"}
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if isinstance(data, list) and data:
+                                em = data[0].get("eventMetadata")
+                                if isinstance(em, dict):
+                                    fp = em.get("finalPrice")
+                                    if fp is not None:
+                                        oracle_strike = float(fp)
+                                        source = f"events_api_finalPrice_prev({prev_slug[-10:]})"
+                except Exception:
+                    pass
 
-        event_metadata = data[0].get("eventMetadata")
-        if not isinstance(event_metadata, dict):
-            return
-
-        price_to_beat = event_metadata.get("priceToBeat")
-        if price_to_beat is None:
-            return
-
-        try:
-            oracle_strike = float(price_to_beat)
-        except (ValueError, TypeError):
-            return
-
-        if oracle_strike <= 0:
+        if oracle_strike is None or oracle_strike <= 0:
             return
 
         old_strike = self._captured_strikes.get(condition_id, 0.0)
@@ -712,10 +738,28 @@ class PolymarketFeed:
         self._oracle_strike_confirmed.add(condition_id)
 
         log.warning(
-            f"[STRIKE] oracle_update market={market_type} slug={slug[:48]} "
-            f"old_strike=${old_strike:,.2f} oracle_strike=${oracle_strike:,.2f} "
-            f"gap=${gap:,.2f} source=events_api_priceToBeat"
+            f"[STRIKE] oracle_confirmed market={market_type} slug={slug[:48]} "
+            f"approx_strike=${old_strike:,.2f} oracle_strike=${oracle_strike:,.2f} "
+            f"gap=${gap:,.2f} source={source}"
         )
+
+    @staticmethod
+    def _prev_window_slug(slug: str) -> str:
+        """Derive the previous window's slug from the current one.
+
+        btc-updown-5m-1774650300 -> btc-updown-5m-1774650000
+        btc-updown-15m-1774650000 -> btc-updown-15m-1774649100
+        """
+        match = re.match(r"^(btc-updown-(\d+)m-)(\d+)$", slug)
+        if not match:
+            return ""
+        prefix, minutes_str, ts_str = match.group(1), match.group(2), match.group(3)
+        try:
+            ts = int(ts_str)
+            window_seconds = int(minutes_str) * 60
+            return f"{prefix}{ts - window_seconds}"
+        except (ValueError, TypeError):
+            return ""
 
     @staticmethod
     def _parse_strike_price(data: dict) -> float:
