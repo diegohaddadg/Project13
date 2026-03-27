@@ -185,7 +185,6 @@ class OrderManager:
             log.warning(
                 f"[ORDER_MGR] Expired {expired_count} stale LIVE orders from previous session"
             )
-            seen.add(o.order_id)
 
     @property
     def rejected_count(self) -> int:
