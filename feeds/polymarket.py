@@ -106,6 +106,8 @@ class PolymarketFeed:
         self._active_condition_ids: dict[str, str] = {}
         # Strike prices captured at market discovery (BTC spot at the time)
         self._captured_strikes: dict[str, float] = {}
+        # Condition IDs whose strike has been confirmed from oracle priceToBeat
+        self._oracle_strike_confirmed: set[str] = set()
 
         self.poll_count: int = 0
         self.transition_count: int = 0
@@ -258,9 +260,14 @@ class PolymarketFeed:
                 self._active_condition_ids[market_type] = condition_id
 
                 # Capture current BTC spot as strike for this new market
+                # (approximate — replaced by oracle priceToBeat once available)
                 if self._latest_spot_price > 0:
                     self._captured_strikes[condition_id] = self._latest_spot_price
-                    log.info(f"  Strike captured: ${self._latest_spot_price:,.2f} (BTC spot at discovery)")
+                    log.info(f"  Strike captured: ${self._latest_spot_price:,.2f} (BTC spot at discovery, approximate)")
+
+            # Try to upgrade strike to real oracle priceToBeat from events API
+            slug = market_data.get("slug", "")
+            await self._try_update_strike_from_oracle(condition_id, slug, market_type)
 
             state = await self._build_market_state(market_data, market_type)
             if state:
@@ -520,13 +527,19 @@ class PolymarketFeed:
             now_utc = datetime.now(timezone.utc)
             window_duration = 300.0 if market_type == "btc-5min" else 900.0
 
-            # Strike: lock at first discovery of this market. Once locked, stays fixed.
-            # This is the BTC spot price (Coinbase USD preferred) at the moment
-            # the bot first sees this contract.
+            # Strike: from oracle priceToBeat if available, else BTC spot at discovery.
             strike_price = self._captured_strikes.get(condition_id, 0.0)
             if strike_price <= 0 and self._latest_spot_price > 0:
                 strike_price = self._latest_spot_price
                 self._captured_strikes[condition_id] = strike_price
+
+            is_oracle = condition_id in self._oracle_strike_confirmed
+            spot_gap = abs(self._latest_spot_price - strike_price) if self._latest_spot_price > 0 and strike_price > 0 else 0.0
+            log.info(
+                f"[STRIKE] market={market_type} window={slug[:48]} "
+                f"strike=${strike_price:,.2f} spot=${self._latest_spot_price:,.2f} "
+                f"gap=${spot_gap:,.2f} source={'oracle' if is_oracle else 'spot_approx'}"
+            )
 
             gamma_tr = self._compute_time_remaining(end_date_str)
             time_remaining, time_to_window, window_started, timing_source = (
@@ -644,6 +657,65 @@ class PolymarketFeed:
         except (aiohttp.ClientError, KeyError, ValueError) as e:
             log.warning(f"CLOB orderbook error: {e}")
             return ([], [])
+
+    async def _try_update_strike_from_oracle(
+        self, condition_id: str, slug: str, market_type: str
+    ) -> None:
+        """Check the Gamma events API for the real oracle priceToBeat.
+
+        The events endpoint exposes eventMetadata.priceToBeat once the Chainlink
+        oracle records the BTC price at the window start. This is the true strike
+        — our initial capture from Coinbase spot is an approximation that can be
+        $10-50 off if there was any delay in market discovery.
+
+        This method is idempotent: once priceToBeat is confirmed, further calls
+        are no-ops.
+        """
+        if condition_id in self._oracle_strike_confirmed:
+            return
+        if not slug or not self._session or self._session.closed:
+            return
+
+        url = f"{config.POLYMARKET_GAMMA_API_URL}/events"
+        try:
+            async with self._session.get(
+                url, params={"slug": slug, "limit": "1"}
+            ) as resp:
+                if resp.status != 200:
+                    return
+                data = await resp.json()
+        except Exception:
+            return
+
+        if not isinstance(data, list) or not data:
+            return
+
+        event_metadata = data[0].get("eventMetadata")
+        if not isinstance(event_metadata, dict):
+            return
+
+        price_to_beat = event_metadata.get("priceToBeat")
+        if price_to_beat is None:
+            return
+
+        try:
+            oracle_strike = float(price_to_beat)
+        except (ValueError, TypeError):
+            return
+
+        if oracle_strike <= 0:
+            return
+
+        old_strike = self._captured_strikes.get(condition_id, 0.0)
+        gap = abs(oracle_strike - old_strike) if old_strike > 0 else 0.0
+        self._captured_strikes[condition_id] = oracle_strike
+        self._oracle_strike_confirmed.add(condition_id)
+
+        log.warning(
+            f"[STRIKE] oracle_update market={market_type} slug={slug[:48]} "
+            f"old_strike=${old_strike:,.2f} oracle_strike=${oracle_strike:,.2f} "
+            f"gap=${gap:,.2f} source=events_api_priceToBeat"
+        )
 
     @staticmethod
     def _parse_strike_price(data: dict) -> float:
