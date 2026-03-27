@@ -165,6 +165,26 @@ class OrderManager:
             if o.order_id in seen:
                 continue
             self._pm.restore_open_position_from_order(o)
+
+    def _expire_stale_live_orders(self) -> None:
+        """Mark LIVE orders from previous sessions as EXPIRED.
+
+        On restart, LIVE orders in the trade log are from past sessions.
+        Their market windows have long since resolved. Keeping them as LIVE
+        blocks new entries via the max-concurrent count. Mark them EXPIRED
+        so they don't pollute the active order count.
+        """
+        expired_count = 0
+        for o in self._order_history:
+            if o.status == "LIVE" and o.execution_mode == "live":
+                o.status = "EXPIRED"
+                o.metadata["expired_reason"] = "stale_from_previous_session"
+                self._append_trade_log(o)
+                expired_count += 1
+        if expired_count > 0:
+            log.warning(
+                f"[ORDER_MGR] Expired {expired_count} stale LIVE orders from previous session"
+            )
             seen.add(o.order_id)
 
     @property
@@ -604,6 +624,7 @@ class OrderManager:
                 f"(spent=${total_spent:.2f}, payouts=${total_payouts:.2f})"
             )
             self._restore_open_positions_from_orders()
+            self._expire_stale_live_orders()
 
         # region agent log
         try:

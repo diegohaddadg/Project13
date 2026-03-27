@@ -34,7 +34,7 @@ class Order:
     size_usdc: float = 0.0         # Total USDC commitment
     num_shares: float = 0.0        # size_usdc / price (rounded)
     order_type: str = "LIMIT"      # "LIMIT" | "MARKET"
-    status: str = "PENDING"        # PENDING|SUBMITTED|LIVE|FILLED|PARTIAL|CANCELLED|FAILED|REJECTED
+    status: str = "PENDING"        # PENDING|SUBMITTED|LIVE|FILLED|PARTIAL|CANCELLED|EXPIRED|FAILED|REJECTED
     fill_price: Optional[float] = None
     fill_timestamp: Optional[float] = None
     pnl: Optional[float] = None
@@ -43,7 +43,7 @@ class Order:
 
     def is_complete(self) -> bool:
         """True if the order has reached a terminal state."""
-        return self.status in ("FILLED", "CANCELLED", "FAILED", "REJECTED")
+        return self.status in ("FILLED", "CANCELLED", "EXPIRED", "FAILED", "REJECTED")
 
     def was_profitable(self) -> Optional[bool]:
         """True if PnL > 0, False if <= 0, None if not yet resolved."""
