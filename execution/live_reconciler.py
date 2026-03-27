@@ -254,72 +254,143 @@ class LiveReconciler:
 
     def _check_and_redeem(self, summary: dict) -> None:
         """Check for resolved markets and handle winning/losing positions."""
+        all_open = self._pm.get_open_positions()
         open_live = [
-            p for p in self._pm.get_open_positions()
+            p for p in all_open
             if p.metadata.get("execution_mode") == "live" and not p.metadata.get("redeemed")
         ]
 
-        if open_live:
-            log.info(f"[RECON] Checking {len(open_live)} live positions for resolution/redemption")
+        log.info(
+            f"[REDEEM] scan_start total_open={len(all_open)} "
+            f"live_unredeemed={len(open_live)}"
+        )
+
+        if not open_live:
+            log.info("[REDEEM] scan_start no live unredeemed positions — nothing to do")
+            return
 
         for pos in list(open_live):
             condition_id = pos.metadata.get("condition_id", "")
             pos_token = pos.metadata.get("token_id", "")
 
+            log.info(
+                f"[REDEEM] candidate_found pos={pos.position_id} "
+                f"status={pos.status} direction={pos.direction} "
+                f"market_type={pos.market_type} market_id={pos.market_id} "
+                f"condition_id={condition_id[:20] + '...' if condition_id else 'EMPTY'} "
+                f"token_id={'...' + pos_token[-12:] if pos_token else 'EMPTY'} "
+                f"entry_price={pos.entry_price:.3f} shares={pos.num_shares:.1f}"
+            )
+
             # Handle CLAIMABLE positions
             if pos.status == "CLAIMABLE":
                 retry_count = pos.metadata.get("redeem_retry_count", 0)
                 if retry_count >= config.LIVE_REDEEM_MAX_RETRIES:
+                    log.info(
+                        f"[REDEEM] candidate CLAIMABLE max_retries_exhausted "
+                        f"pos={pos.position_id} retries={retry_count} "
+                        f"— checking for external claim"
+                    )
                     self._detect_external_claim(pos, condition_id, summary)
                     continue
                 cooldown_until = self._redeem_cooldowns.get(pos.position_id, 0)
-                if time.time() >= cooldown_until and condition_id:
+                remaining = cooldown_until - time.time()
+                if not condition_id:
+                    log.warning(
+                        f"[REDEEM] skip reason=claimable_missing_condition_id "
+                        f"pos={pos.position_id} — cannot retry without condition_id"
+                    )
+                elif remaining > 0:
+                    log.info(
+                        f"[REDEEM] skip reason=claimable_cooldown_active "
+                        f"pos={pos.position_id} cooldown_remaining={remaining:.0f}s "
+                        f"retry={retry_count}/{config.LIVE_REDEEM_MAX_RETRIES}"
+                    )
+                else:
+                    log.info(
+                        f"[REDEEM] claimable_retry_eligible pos={pos.position_id} "
+                        f"retry={retry_count + 1}/{config.LIVE_REDEEM_MAX_RETRIES}"
+                    )
                     self._attempt_redemption(pos, condition_id, summary)
                 continue
 
             if not condition_id:
-                log.info(f"[RECON] Skipping {pos.position_id}: no condition_id in metadata")
+                log.warning(
+                    f"[REDEEM] skip reason=missing_condition_id "
+                    f"pos={pos.position_id} market_id={pos.market_id} "
+                    f"— position cannot be checked for resolution"
+                )
+                continue
+
+            if not pos_token:
+                log.warning(
+                    f"[REDEEM] skip reason=missing_token_id "
+                    f"pos={pos.position_id} market_id={pos.market_id} "
+                    f"condition={condition_id[:16]}... "
+                    f"— cannot determine win/loss without token_id"
+                )
                 continue
 
             # Check cooldown
             cooldown_until = self._redeem_cooldowns.get(pos.position_id, 0)
             if time.time() < cooldown_until:
+                remaining = cooldown_until - time.time()
+                log.info(
+                    f"[REDEEM] skip reason=cooldown_active "
+                    f"pos={pos.position_id} cooldown_remaining={remaining:.0f}s"
+                )
                 continue
 
             # Check if market is resolved on exchange
             log.warning(
-                f"[RECON] RESOLUTION CHECK START: pos={pos.position_id} "
+                f"[REDEEM] resolution_check_start pos={pos.position_id} "
                 f"market_id={pos.market_id} direction={pos.direction} "
                 f"condition={condition_id[:16]}... "
                 f"token=...{pos_token[-12:] if pos_token else 'NONE'}"
             )
 
-            resolved_info = self._check_market_resolved(condition_id, market_id=pos.market_id)
+            try:
+                resolved_info = self._check_market_resolved(condition_id, market_id=pos.market_id)
+            except Exception as e:
+                log.exception(
+                    f"[REDEEM] skip reason=resolution_check_exception "
+                    f"pos={pos.position_id} error={e}"
+                )
+                continue
+
             if resolved_info is None:
-                log.info(f"[RECON] RESOLUTION CHECK: no result for {pos.position_id}")
+                log.info(
+                    f"[REDEEM] skip reason=resolution_check_no_data "
+                    f"pos={pos.position_id} market_id={pos.market_id} "
+                    f"condition={condition_id[:16]}..."
+                )
                 continue
 
             is_resolved = resolved_info.get("resolved", False)
             if not is_resolved:
-                log.info(f"[RECON] RESOLUTION CHECK: market NOT resolved for {pos.position_id}")
+                log.info(
+                    f"[REDEEM] skip reason=market_not_resolved "
+                    f"pos={pos.position_id} market_id={pos.market_id}"
+                )
                 continue
 
-            # Determine if this position won
+            # Market is resolved — determine winner
             winning_token = resolved_info.get("winning_token_id", "")
 
             log.warning(
-                f"[RECON] RESOLUTION DETECTED: pos={pos.position_id} "
+                f"[REDEEM] resolved_market_detected pos={pos.position_id} "
                 f"direction={pos.direction} market={pos.market_type} "
                 f"condition={condition_id[:16]}... "
                 f"pos_token=...{pos_token[-12:] if pos_token else 'NONE'} "
                 f"winning_token=...{winning_token[-12:] if winning_token else 'NONE'}"
             )
 
-            if not winning_token or not pos_token:
+            if not winning_token:
                 log.warning(
-                    f"[RECON] Cannot determine winner: "
-                    f"winning_token={'SET' if winning_token else 'MISSING'} "
-                    f"pos_token={'SET' if pos_token else 'MISSING'}"
+                    f"[REDEEM] skip reason=winning_token_unknown "
+                    f"pos={pos.position_id} market_id={pos.market_id} "
+                    f"condition={condition_id[:16]}... "
+                    f"— market resolved but cannot determine which token won"
                 )
                 continue
 
@@ -327,17 +398,24 @@ class LiveReconciler:
 
             if won:
                 log.warning(
-                    f"[RECON] WINNER IDENTIFIED: {pos.direction} {pos.market_type} "
+                    f"[REDEEM] eligibility_passed outcome=WIN "
+                    f"pos={pos.position_id} {pos.direction} {pos.market_type} "
                     f"{pos.num_shares:.1f}sh @{pos.entry_price:.3f} "
                     f"condition={condition_id[:16]}..."
                 )
                 self._attempt_redemption(pos, condition_id, summary)
             else:
                 log.warning(
-                    f"[RECON] LOSER IDENTIFIED: {pos.direction} {pos.market_type} "
+                    f"[REDEEM] eligibility_passed outcome=LOSS "
+                    f"pos={pos.position_id} {pos.direction} {pos.market_type} "
                     f"{pos.num_shares:.1f}sh @{pos.entry_price:.3f}"
                 )
                 self._close_losing_position(pos, summary)
+
+        log.info(
+            f"[REDEEM] scan_complete positions_checked={len(open_live)} "
+            f"redemptions_this_cycle={summary.get('redemptions_this_cycle', 0)}"
+        )
 
     def _check_market_resolved(self, condition_id: str, market_id: str = "") -> Optional[dict]:
         """Check if a market has resolved. Uses Gamma API as primary source.
@@ -349,9 +427,17 @@ class LiveReconciler:
         resp = None
         source = "none"
 
+        log.info(
+            f"[REDEEM] api_call action=check_market_resolved "
+            f"condition={condition_id[:16]}... market_id={market_id or 'EMPTY'}"
+        )
+
         # Primary: Gamma /markets/{id} — direct single-market lookup by numeric ID
         if not market_id:
-            log.warning(f"[RECON] market_id is EMPTY for condition={condition_id[:16]}... — Gamma lookup will fail")
+            log.warning(
+                f"[REDEEM] skip reason=empty_market_id "
+                f"condition={condition_id[:16]}... — Gamma lookup will fail"
+            )
         if market_id:
             try:
                 import urllib.request
@@ -390,12 +476,16 @@ class LiveReconciler:
 
         if resp is None:
             log.warning(
-                f"[RECON] RESOLUTION CHECK FAILED: no data for "
+                f"[REDEEM] failure reason=all_api_sources_returned_no_data "
                 f"market_id={market_id} condition={condition_id[:16]}..."
             )
             return None
 
         if not isinstance(resp, dict):
+            log.warning(
+                f"[REDEEM] failure reason=api_response_not_dict "
+                f"type={type(resp).__name__} market_id={market_id}"
+            )
             return None
 
         # --- Parse closed/resolved with type coercion ---
@@ -432,7 +522,7 @@ class LiveReconciler:
 
         # --- Diagnostic log ---
         log.warning(
-            f"[RECON] RESOLUTION CHECK: source={source} "
+            f"[REDEEM] resolution_check_result source={source} "
             f"market_id={market_id} condition={condition_id[:16]}... "
             f"closed={raw_closed}({type(raw_closed).__name__}) "
             f"active={raw_active}({type(raw_active).__name__}) "
@@ -440,6 +530,13 @@ class LiveReconciler:
             f"resolved_parsed={resolved} "
             f"winning={'...'+winning_token_id[-12:] if winning_token_id else 'NONE'}"
         )
+
+        if resolved and not winning_token_id:
+            log.warning(
+                f"[REDEEM] warning=resolved_but_no_winner "
+                f"market_id={market_id} condition={condition_id[:16]}... "
+                f"source={source} — tokens list and outcomePrices both failed to yield winner"
+            )
 
         return {
             "resolved": resolved,
@@ -461,14 +558,16 @@ class LiveReconciler:
                 pos.status = "CLAIMABLE"
                 pos.metadata["claimable_since"] = time.time()
             log.warning(
-                f"[RECON] CLAIMABLE_MANUAL_ACTION_REQUIRED: {pos.direction} {pos.market_type} "
-                f"{pos.num_shares:.1f}sh — auto-redeem exhausted after {retry_count} attempts. "
-                f"Claim manually via Polymarket UI."
+                f"[REDEEM] skip reason=max_retries_exhausted "
+                f"pos={pos.position_id} {pos.direction} {pos.market_type} "
+                f"{pos.num_shares:.1f}sh retries={retry_count}/{config.LIVE_REDEEM_MAX_RETRIES} "
+                f"— marked CLAIMABLE_MANUAL_ACTION_REQUIRED"
             )
             return
 
         log.warning(
-            f"[RECON] REDEEM START: {pos.direction} {pos.market_type} "
+            f"[REDEEM] attempt_start pos={pos.position_id} "
+            f"{pos.direction} {pos.market_type} "
             f"{pos.num_shares:.1f}sh @{pos.entry_price:.3f} "
             f"condition={condition_id[:16]}... "
             f"attempt={retry_count + 1}/{config.LIVE_REDEEM_MAX_RETRIES} "
@@ -480,6 +579,10 @@ class LiveReconciler:
 
             if success:
                 # Confirmed on-chain redeem — NOW close position and return capital
+                log.info(
+                    f"[REDEEM] accounting_update action=close_position "
+                    f"pos={pos.position_id} resolution_price=1.0 (WIN)"
+                )
                 resolved_pos = self._pm.close_position(pos.position_id, 1.0)
                 if resolved_pos:
                     resolved_pos.metadata["redeemed"] = True
@@ -488,14 +591,26 @@ class LiveReconciler:
                         self._om.sync_order_pnl_from_position(
                             resolved_pos.order_id, resolved_pos.pnl
                         )
+                        log.info(
+                            f"[REDEEM] accounting_updated order_pnl_synced "
+                            f"order={resolved_pos.order_id} pnl={resolved_pos.pnl:+.4f}"
+                        )
+                else:
+                    log.warning(
+                        f"[REDEEM] failure reason=close_position_returned_none "
+                        f"pos={pos.position_id} — position may already be closed"
+                    )
 
                 self._redeemed_count += 1
                 summary["redemptions_this_cycle"] += 1
 
                 pnl_str = f" PnL={resolved_pos.pnl:+.2f}" if resolved_pos and resolved_pos.pnl is not None else ""
+                capital = self._pm.get_available_capital()
                 log.warning(
-                    f"[RECON] REDEEMED: {pos.direction} {pos.market_type} "
-                    f"{pos.num_shares:.1f}sh{pnl_str}"
+                    f"[REDEEM] success pos={pos.position_id} "
+                    f"{pos.direction} {pos.market_type} "
+                    f"{pos.num_shares:.1f}sh{pnl_str} "
+                    f"capital_after=${capital:.2f}"
                 )
             else:
                 # Redemption method returned False — mark claimable, schedule retry
@@ -504,7 +619,8 @@ class LiveReconciler:
                     pos.metadata["claimable_since"] = time.time()
                 self._schedule_retry(pos)
                 log.warning(
-                    f"[RECON] REDEEM FAILED (no method succeeded): {pos.direction} {pos.market_type} "
+                    f"[REDEEM] failure reason=execute_redemption_returned_false "
+                    f"pos={pos.position_id} {pos.direction} {pos.market_type} "
                     f"— marked CLAIMABLE, will retry"
                 )
 
@@ -515,29 +631,38 @@ class LiveReconciler:
                 pos.status = "CLAIMABLE"
                 pos.metadata["claimable_since"] = time.time()
             self._schedule_retry(pos)
-            log.error(f"[RECON] REDEEM FAILED: {pos.position_id} — {e}")
+            log.exception(
+                f"[REDEEM] failure reason=exception "
+                f"pos={pos.position_id} error={e}"
+            )
 
     def _ensure_onchain_redeemer(self) -> bool:
         """Lazily initialize the on-chain redeemer on first redemption attempt."""
         if self._onchain_redeemer is not None:
             return self._onchain_redeemer.is_ready
         if self._onchain_redeemer_init_attempted:
+            log.info("[REDEEM] skip reason=onchain_redeemer_already_failed_init")
             return False  # Already tried and failed
 
         self._onchain_redeemer_init_attempted = True
+        log.info("[REDEEM] api_call action=initialize_onchain_redeemer")
         try:
             from execution.onchain_redeemer import OnchainRedeemer
             self._onchain_redeemer = OnchainRedeemer()
             if self._onchain_redeemer.initialize():
+                log.info("[REDEEM] onchain_redeemer initialized successfully")
                 return True
             else:
-                log.warning("[RECON] On-chain redeemer init failed — will use fallback methods")
+                log.warning(
+                    f"[REDEEM] failure reason=onchain_redeemer_init_returned_false "
+                    f"init_error={self._onchain_redeemer._init_error}"
+                )
                 return False
         except ImportError as e:
-            log.warning(f"[RECON] On-chain redeemer unavailable (web3 not installed): {e}")
+            log.warning(f"[REDEEM] failure reason=web3_not_installed error={e}")
             return False
         except Exception as e:
-            log.warning(f"[RECON] On-chain redeemer init error: {e}")
+            log.warning(f"[REDEEM] failure reason=onchain_redeemer_init_exception error={e}")
             return False
 
     def _execute_redemption(self, condition_id: str, pos: Position) -> bool:
@@ -548,37 +673,61 @@ class LiveReconciler:
         # On-chain redemption via NegRiskAdapter (routed through proxy for proxy wallets)
         redeemer_ready = self._ensure_onchain_redeemer()
         log.warning(
-            f"[RECON] REDEEM PATH CHOSEN: "
-            f"onchain_redeemer={'READY' if redeemer_ready else 'NOT AVAILABLE'} "
-            f"condition={condition_id[:16]}..."
+            f"[REDEEM] api_call action=execute_redemption "
+            f"onchain_redeemer={'READY' if redeemer_ready else 'NOT_AVAILABLE'} "
+            f"condition={condition_id[:16]}... "
+            f"pos={pos.position_id}"
         )
 
         if redeemer_ready:
             try:
+                log.info(
+                    f"[REDEEM] api_call action=onchain_redeem "
+                    f"condition={condition_id} pos={pos.position_id}"
+                )
                 result = self._onchain_redeemer.redeem(condition_id)
                 if result["success"]:
                     pos.metadata["redeem_tx_hash"] = result["tx_hash"]
                     pos.metadata["redeem_gas_used"] = result.get("gas_used")
                     log.warning(
-                        f"[RECON] REDEEM TX CONFIRMED: tx={result['tx_hash']} "
-                        f"gas={result.get('gas_used', '?')}"
+                        f"[REDEEM] success tx_confirmed tx={result['tx_hash']} "
+                        f"gas={result.get('gas_used', '?')} pos={pos.position_id}"
                     )
                     return True
                 else:
-                    log.warning(f"[RECON] On-chain redeem failed: {result['error']}")
+                    log.warning(
+                        f"[REDEEM] failure reason=onchain_tx_failed "
+                        f"error={result['error']} "
+                        f"tx_hash={result.get('tx_hash', 'NONE')} "
+                        f"pos={pos.position_id}"
+                    )
                     if result.get("tx_hash"):
                         pos.metadata["redeem_failed_tx"] = result["tx_hash"]
             except Exception as e:
-                log.warning(f"[RECON] On-chain redeem exception: {e}")
+                log.exception(
+                    f"[REDEEM] failure reason=onchain_redeem_exception "
+                    f"error={e} pos={pos.position_id}"
+                )
+        else:
+            log.warning(
+                f"[REDEEM] failure reason=no_redemption_method_available "
+                f"condition={condition_id[:16]}... pos={pos.position_id} "
+                f"— on-chain redeemer not ready, no fallback"
+            )
 
         log.warning(
-            f"[RECON] Redemption failed for {condition_id[:16]}. "
-            f"Position will be marked CLAIMABLE."
+            f"[REDEEM] final_state outcome=FAILED "
+            f"condition={condition_id[:16]}... pos={pos.position_id} "
+            f"— position will be marked CLAIMABLE"
         )
         return False
 
     def _close_losing_position(self, pos: Position, summary: dict) -> None:
         """Close a losing resolved position locally."""
+        log.info(
+            f"[REDEEM] accounting_update action=close_losing_position "
+            f"pos={pos.position_id} resolution_price=0.0 (LOSS)"
+        )
         resolved_pos = self._pm.close_position(pos.position_id, 0.0)
         if resolved_pos:
             resolved_pos.metadata["recon_loss_detected"] = True
@@ -586,9 +735,20 @@ class LiveReconciler:
                 self._om.sync_order_pnl_from_position(
                     resolved_pos.order_id, resolved_pos.pnl
                 )
+                log.info(
+                    f"[REDEEM] accounting_updated order_pnl_synced "
+                    f"order={resolved_pos.order_id} pnl={resolved_pos.pnl:+.4f}"
+                )
             log.warning(
-                f"[RECON] LOSS DETECTED: {pos.direction} {pos.market_type} "
-                f"PnL={resolved_pos.pnl:+.2f}"
+                f"[REDEEM] final_state outcome=LOSS "
+                f"pos={pos.position_id} {pos.direction} {pos.market_type} "
+                f"PnL={resolved_pos.pnl:+.2f} "
+                f"capital_after=${self._pm.get_available_capital():.2f}"
+            )
+        else:
+            log.warning(
+                f"[REDEEM] failure reason=close_losing_position_returned_none "
+                f"pos={pos.position_id} — position may already be closed"
             )
 
     def _detect_external_claim(self, pos: Position, condition_id: str, summary: dict) -> None:
@@ -601,22 +761,53 @@ class LiveReconciler:
         The cash IS in the Polymarket wallet — our local state just hasn't caught up.
         """
         if not condition_id:
+            log.warning(
+                f"[REDEEM] skip reason=external_claim_missing_condition_id "
+                f"pos={pos.position_id}"
+            )
             return
+
+        log.info(
+            f"[REDEEM] external_claim_check pos={pos.position_id} "
+            f"condition={condition_id[:16]}..."
+        )
 
         # Re-verify the market is resolved and this position won
         resolved_info = self._check_market_resolved(condition_id, market_id=pos.market_id)
         if resolved_info is None or not resolved_info.get("resolved"):
+            log.info(
+                f"[REDEEM] skip reason=external_claim_market_not_resolved "
+                f"pos={pos.position_id}"
+            )
             return
 
         winning_token = resolved_info.get("winning_token_id", "")
         pos_token = pos.metadata.get("token_id", "")
-        if not winning_token or not pos_token or pos_token != winning_token:
+        if not winning_token or not pos_token:
+            log.warning(
+                f"[REDEEM] skip reason=external_claim_missing_token "
+                f"pos={pos.position_id} "
+                f"winning_token={'SET' if winning_token else 'EMPTY'} "
+                f"pos_token={'SET' if pos_token else 'EMPTY'}"
+            )
+            return
+        if pos_token != winning_token:
+            log.info(
+                f"[REDEEM] skip reason=external_claim_position_lost "
+                f"pos={pos.position_id} — token mismatch, closing as LOSS"
+            )
+            self._close_losing_position(pos, summary)
             return
 
         # Market is resolved, this position's token won, auto-redeem exhausted.
         # Close locally with correct accounting (resolution_price=1.0 = full win).
         claimable_since = pos.metadata.get("claimable_since", 0)
         age = time.time() - claimable_since if claimable_since else 0
+
+        log.info(
+            f"[REDEEM] accounting_update action=external_claim_close "
+            f"pos={pos.position_id} resolution_price=1.0 claimable_age={age:.0f}s"
+        )
 
         resolved_pos = self._pm.close_position(pos.position_id, 1.0)
         if resolved_pos:
@@ -632,10 +823,16 @@ class LiveReconciler:
             summary["redemptions_this_cycle"] += 1
 
             log.warning(
-                f"[RECON] EXTERNAL CLAIM DETECTED: {pos.direction} {pos.market_type} "
-                f"{pos.num_shares:.1f}sh — was CLAIMABLE for {age:.0f}s, "
-                f"closing locally as WIN. PnL={resolved_pos.pnl:+.2f} "
-                f"Capital restored: ${self._pm.get_available_capital():.2f}"
+                f"[REDEEM] success external_claim pos={pos.position_id} "
+                f"{pos.direction} {pos.market_type} "
+                f"{pos.num_shares:.1f}sh — was CLAIMABLE for {age:.0f}s "
+                f"PnL={resolved_pos.pnl:+.2f} "
+                f"capital_after=${self._pm.get_available_capital():.2f}"
+            )
+        else:
+            log.warning(
+                f"[REDEEM] failure reason=external_claim_close_returned_none "
+                f"pos={pos.position_id}"
             )
 
     def _schedule_retry(self, pos: Position) -> None:
@@ -645,7 +842,11 @@ class LiveReconciler:
         backoff = config.LIVE_REDEEM_RETRY_BACKOFF_SECONDS * (2 ** min(retry_count - 1, 4))
         self._redeem_cooldowns[pos.position_id] = time.time() + backoff
         self._redeem_failures += 1
-        log.info(f"[RECON] Retry #{retry_count} for {pos.position_id} in {backoff:.0f}s")
+        log.warning(
+            f"[REDEEM] retry_scheduled pos={pos.position_id} "
+            f"retry={retry_count}/{config.LIVE_REDEEM_MAX_RETRIES} "
+            f"backoff={backoff:.0f}s next_attempt_in={backoff:.0f}s"
+        )
 
     # ------------------------------------------------------------------
     # Startup sync
@@ -863,6 +1064,10 @@ def _extract_winner_from_gamma(resp: dict) -> str:
         except Exception:
             clob_token_ids = []
     if not isinstance(clob_token_ids, list) or len(clob_token_ids) < 2:
+        log.info(
+            f"[REDEEM] winner_extraction_failed reason=insufficient_clobTokenIds "
+            f"raw={resp.get('clobTokenIds')!r}"
+        )
         return ""
 
     outcome_prices = resp.get("outcomePrices")
@@ -875,12 +1080,29 @@ def _extract_winner_from_gamma(resp: dict) -> str:
         try:
             p0 = float(outcome_prices[0])
             p1 = float(outcome_prices[1])
+            log.info(
+                f"[REDEEM] winner_extraction outcomePrices=[{p0}, {p1}] "
+                f"clobTokenIds=[...{str(clob_token_ids[0])[-12:]}, ...{str(clob_token_ids[1])[-12:]}]"
+            )
             if p0 > 0.9:
                 return str(clob_token_ids[0]).strip()
             elif p1 > 0.9:
                 return str(clob_token_ids[1]).strip()
-        except (ValueError, TypeError):
-            pass
+            else:
+                log.warning(
+                    f"[REDEEM] winner_extraction_failed reason=no_price_above_0.9 "
+                    f"p0={p0} p1={p1} — market may not be fully resolved"
+                )
+        except (ValueError, TypeError) as e:
+            log.warning(
+                f"[REDEEM] winner_extraction_failed reason=price_parse_error "
+                f"error={e} outcomePrices={outcome_prices!r}"
+            )
+    else:
+        log.info(
+            f"[REDEEM] winner_extraction_failed reason=insufficient_outcomePrices "
+            f"raw={resp.get('outcomePrices')!r}"
+        )
 
     return ""
 
