@@ -38,12 +38,15 @@ class OrderManager:
         self._rejected_count: int = 0
         self._rejection_reasons: dict[str, int] = {}  # category -> count
         self._recent_rejections: list[dict] = []  # last N rejections with detail
+        self._last_reject_reason: str = ""  # exposed for trace logging
 
         # Dedup tracking: (market_id, direction, strategy) -> last_execute_time
         self._dedup: dict[tuple[str, str, str], float] = {}
 
         # Last sizing computation detail (for dashboard observability)
         self._last_sizing_detail: dict = {}
+
+        log.warning("[ORDER_MGR] PATCH_ACTIVE rejection_logging_v1")
 
         self._load_trade_log()
 
@@ -97,12 +100,14 @@ class OrderManager:
         # Pre-trade validation
         rejection = self._validate(signal, market_snapshot)
         if rejection:
+            self._last_reject_reason = rejection
             self._record_rejection(rejection, signal)
             return None
 
         # Construct order
         order = self._build_order(signal, market_snapshot)
         if order is None:
+            self._last_reject_reason = "build_order_failed"
             self._rejected_count += 1
             return None
 
@@ -220,7 +225,11 @@ class OrderManager:
         if len(self._recent_rejections) > 100:
             self._recent_rejections = self._recent_rejections[-50:]
 
-        log.info(f"[{config.EXECUTION_MODE.upper()}] Rejected [{cat}]: {reason}")
+        log.warning(
+            f"[ORDER_MGR] REJECT category={cat} reason={reason} "
+            f"signal_id={signal.signal_id} strategy={signal.strategy} "
+            f"direction={signal.direction} market_type={signal.market_type}"
+        )
 
     def cancel_order(self, order_id: str) -> bool:
         for order in self._order_history:
@@ -237,6 +246,7 @@ class OrderManager:
         self, signal: TradeSignal, snapshot: Optional[MarketState]
     ) -> Optional[str]:
         """Run all pre-trade checks. Returns rejection reason or None if OK."""
+        sig_tag = f"sig={signal.signal_id} {signal.direction} {signal.market_type}"
 
         if not config.TRADING_ENABLED:
             return "Trading is disabled"
@@ -247,33 +257,37 @@ class OrderManager:
         # Signal freshness
         age = time.time() - signal.timestamp
         if age > config.MAX_SIGNAL_AGE_SECONDS:
+            log.warning(f"[ORDER_MGR] REJECT {sig_tag} reason=stale_signal age={age:.1f}s max={config.MAX_SIGNAL_AGE_SECONDS}s")
             return f"Signal too old: {age:.1f}s (max {config.MAX_SIGNAL_AGE_SECONDS}s)"
 
         if not signal.is_actionable():
+            log.warning(f"[ORDER_MGR] REJECT {sig_tag} reason=not_actionable edge={signal.edge:.3f} net_ev={signal.net_ev:.4f} conf={signal.confidence}")
             return "Signal is not actionable"
 
         # Time remaining
         if signal.time_remaining < config.MIN_EXECUTION_TIME_REMAINING:
+            log.warning(f"[ORDER_MGR] REJECT {sig_tag} reason=insufficient_time remaining={signal.time_remaining:.0f}s min={config.MIN_EXECUTION_TIME_REMAINING}s")
             return f"Insufficient time remaining: {signal.time_remaining:.0f}s"
 
         # Market snapshot validation
         if snapshot is None:
+            log.warning(f"[ORDER_MGR] REJECT {sig_tag} reason=no_snapshot")
             return "No market snapshot available"
 
         if not snapshot.is_active:
+            log.warning(f"[ORDER_MGR] REJECT {sig_tag} reason=market_inactive market_id={signal.market_id}")
             return "Market is not active"
 
         # Token mapping
         if signal.direction == "UP" and not snapshot.up_token_id:
+            log.warning(f"[ORDER_MGR] REJECT {sig_tag} reason=no_up_token")
             return "No Up token_id available — cannot map direction to token"
         if signal.direction == "DOWN" and not snapshot.down_token_id:
+            log.warning(f"[ORDER_MGR] REJECT {sig_tag} reason=no_down_token")
             return "No Down token_id available — cannot map direction to token"
 
         # Position limits — controlled multi-entry
-        # Count filled open positions for this market
         market_positions = self._pm.count_positions_for_market(signal.market_id)
-        # In live mode, also count LIVE (accepted but not yet filled) orders
-        # toward the cap to prevent overstacking while fills are pending
         live_pending = 0
         if config.EXECUTION_MODE == "live":
             live_pending = sum(
@@ -284,12 +298,11 @@ class OrderManager:
             )
         total_market_entries = market_positions + live_pending
         if total_market_entries >= config.MAX_ENTRIES_PER_WINDOW:
-            if live_pending > 0:
-                log.warning(
-                    f"[LIVE] WINDOW CAP BLOCK: refusing entry for exact market window "
-                    f"{signal.market_id} ({total_market_entries}/{config.MAX_ENTRIES_PER_WINDOW}: "
-                    f"{market_positions} filled + {live_pending} pending)"
-                )
+            log.warning(
+                f"[ORDER_MGR] REJECT {sig_tag} reason=max_entries_per_window "
+                f"filled={market_positions} pending={live_pending} total={total_market_entries} "
+                f"cap={config.MAX_ENTRIES_PER_WINDOW} market_id={signal.market_id}"
+            )
             return f"Max entries per window reached ({total_market_entries}/{config.MAX_ENTRIES_PER_WINDOW})"
 
         total_open = self._pm.count_open_positions() + (
@@ -298,23 +311,38 @@ class OrderManager:
             if config.EXECUTION_MODE == "live" else 0
         )
         if total_open >= config.MAX_CONCURRENT_POSITIONS:
+            log.warning(
+                f"[ORDER_MGR] REJECT {sig_tag} reason=max_concurrent "
+                f"current_open={total_open} limit={config.MAX_CONCURRENT_POSITIONS}"
+            )
             return f"Max concurrent positions reached ({config.MAX_CONCURRENT_POSITIONS})"
 
         # Capital check
         size_usdc = self._calculate_size_usdc(signal)
         if not self._pm.has_sufficient_capital(size_usdc):
+            log.warning(
+                f"[ORDER_MGR] REJECT {sig_tag} reason=insufficient_capital "
+                f"need=${size_usdc:.2f} have=${self._pm.get_available_capital():.2f}"
+            )
             return (
                 f"Insufficient capital: need ${size_usdc:.2f}, "
                 f"have ${self._pm.get_available_capital():.2f}"
             )
 
         if size_usdc > config.MAX_ORDER_SIZE_CEILING_USDC:
+            log.warning(f"[ORDER_MGR] REJECT {sig_tag} reason=ceiling_exceeded size=${size_usdc:.2f} ceiling=${config.MAX_ORDER_SIZE_CEILING_USDC:.2f}")
             return f"Order size ${size_usdc:.2f} exceeds ceiling ${config.MAX_ORDER_SIZE_CEILING_USDC:.2f}"
 
         # Duplicate suppression
         dedup_key = (signal.market_id, signal.direction, signal.strategy)
         last_exec = self._dedup.get(dedup_key, 0.0)
-        if time.time() - last_exec < config.EXECUTION_DEDUP_SECONDS:
+        dedup_age = time.time() - last_exec
+        if dedup_age < config.EXECUTION_DEDUP_SECONDS:
+            log.warning(
+                f"[ORDER_MGR] REJECT {sig_tag} reason=execution_dedup "
+                f"age={dedup_age:.1f}s threshold={config.EXECUTION_DEDUP_SECONDS}s "
+                f"market_id={signal.market_id}"
+            )
             return "Duplicate signal suppressed (execution dedup)"
 
         return None  # All checks passed

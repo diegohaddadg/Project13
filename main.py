@@ -275,7 +275,11 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
                     approved_sig = risk_result["adjusted_signal"]
                     snapshot = agg.get_current_market(approved_sig.market_type)
                     order = om.execute_signal(approved_sig, snapshot)
-                    trace["order_status"] = order.status if order else "rejected_by_order_mgr"
+                    if order:
+                        trace["order_status"] = order.status
+                    else:
+                        trace["order_status"] = "rejected_by_order_mgr"
+                        trace["order_reject_reason"] = om._last_reject_reason
                     if order and order.status == "FILLED":
                         engine.record_trade(approved_sig.market_type)
                         trace["fill_price"] = order.fill_price
