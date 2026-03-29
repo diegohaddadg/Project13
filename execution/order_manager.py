@@ -421,14 +421,11 @@ class OrderManager:
         new_price = signal.market_probability  # the market price the signal is buying at
         new_edge = signal.edge
 
-        # Condition A: price must be materially better
-        # For UP: lower price is better (buying cheaper)
-        # For DOWN: higher price is better (buying cheaper — DOWN token price = no_price)
+        # Condition A: price must be materially better (cheaper token purchase).
+        # Both UP and DOWN tokens are bought — a lower price always means more
+        # shares per dollar and higher potential profit, regardless of direction.
         min_improvement = config.LAT_ARB_REENTRY_PRICE_IMPROVEMENT_PCT
-        if signal.direction == "UP":
-            price_improved = new_price <= first_price * (1 - min_improvement)
-        else:
-            price_improved = new_price >= first_price * (1 + min_improvement)
+        price_improved = new_price <= first_price * (1 - min_improvement)
 
         if not price_improved:
             log.warning(
