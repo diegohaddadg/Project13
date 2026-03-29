@@ -336,15 +336,15 @@ class OrderManager:
                 )
                 return f"Direction conflict: already have {opposite} in this market"
 
-        # latency_arb: one entry per market window. Repeated same-window entries
-        # have -21.4% ROI without outliers; single-entry windows have +19.9% ROI.
+        # latency_arb: controlled re-entry. First entry is free; second only
+        # if both price and edge have materially improved vs the first entry.
+        # Max 2 latency_arb entries per window.
         if signal.strategy == "latency_arb" and market_positions > 0:
-            log.warning(
-                f"[ORDER_MGR] REJECT {sig_tag} reason=latency_arb_single_entry_window "
-                f"market_id={signal.market_id} strategy=latency_arb "
-                f"existing_positions={market_positions}"
+            rejection = self._check_latency_arb_reentry(
+                signal, sig_tag, market_positions
             )
-            return "latency_arb: single entry per window"
+            if rejection:
+                return rejection
 
         total_open = self._pm.count_open_positions() + (
             sum(1 for o in self._order_history
@@ -387,6 +387,80 @@ class OrderManager:
             return "Duplicate signal suppressed (execution dedup)"
 
         return None  # All checks passed
+
+    # --- Latency arb re-entry gate ---
+
+    def _check_latency_arb_reentry(
+        self, signal: TradeSignal, sig_tag: str, market_positions: int
+    ) -> Optional[str]:
+        """Check whether a 2nd latency_arb entry is justified in this window.
+
+        Returns rejection reason string, or None if allowed.
+        """
+        # Find existing latency_arb positions for this market
+        la_positions = [
+            p for p in self._pm.get_open_positions()
+            if p.market_id == signal.market_id
+            and p.metadata.get("strategy") == "latency_arb"
+        ]
+        la_count = len(la_positions)
+
+        # Hard cap: max 2 latency_arb entries per window
+        if la_count >= config.LAT_ARB_MAX_ENTRIES_PER_WINDOW:
+            log.warning(
+                f"[ORDER_MGR] REJECT {sig_tag} reason=latency_arb_reentry_max_entries "
+                f"market_id={signal.market_id} strategy=latency_arb "
+                f"existing={la_count} max={config.LAT_ARB_MAX_ENTRIES_PER_WINDOW}"
+            )
+            return "latency_arb: max entries per window"
+
+        # Exactly 1 existing entry — evaluate improvement conditions
+        first = min(la_positions, key=lambda p: p.entry_timestamp)
+        first_price = first.entry_price
+        first_edge = first.metadata.get("edge", 0)
+        new_price = signal.market_probability  # the market price the signal is buying at
+        new_edge = signal.edge
+
+        # Condition A: price must be materially better
+        # For UP: lower price is better (buying cheaper)
+        # For DOWN: higher price is better (buying cheaper — DOWN token price = no_price)
+        min_improvement = config.LAT_ARB_REENTRY_PRICE_IMPROVEMENT_PCT
+        if signal.direction == "UP":
+            price_improved = new_price <= first_price * (1 - min_improvement)
+        else:
+            price_improved = new_price >= first_price * (1 + min_improvement)
+
+        if not price_improved:
+            log.warning(
+                f"[ORDER_MGR] REJECT {sig_tag} reason=latency_arb_reentry_price_not_improved "
+                f"market_id={signal.market_id} strategy=latency_arb "
+                f"first_entry_price={first_price:.4f} new_price={new_price:.4f} "
+                f"direction={signal.direction} min_improvement={min_improvement:.0%}"
+            )
+            return "latency_arb: re-entry price not improved enough"
+
+        # Condition B: edge must be materially better
+        min_edge_improvement = config.LAT_ARB_REENTRY_EDGE_IMPROVEMENT_PCT
+        edge_threshold = first_edge * (1 + min_edge_improvement)
+        edge_improved = new_edge >= edge_threshold
+
+        if not edge_improved:
+            log.warning(
+                f"[ORDER_MGR] REJECT {sig_tag} reason=latency_arb_reentry_edge_not_improved "
+                f"market_id={signal.market_id} strategy=latency_arb "
+                f"first_edge={first_edge:.4f} new_edge={new_edge:.4f} "
+                f"threshold={edge_threshold:.4f}"
+            )
+            return "latency_arb: re-entry edge not improved enough"
+
+        # Both conditions passed — allow re-entry
+        log.warning(
+            f"[ORDER_MGR] ALLOW {sig_tag} reason=latency_arb_reentry_improved "
+            f"market_id={signal.market_id} strategy=latency_arb "
+            f"first_entry_price={first_price:.4f} new_price={new_price:.4f} "
+            f"first_edge={first_edge:.4f} new_edge={new_edge:.4f}"
+        )
+        return None
 
     # --- Order construction ---
 

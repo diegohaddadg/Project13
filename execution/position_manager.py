@@ -96,6 +96,7 @@ class PositionManager:
                 "strike": order.metadata.get("strike", 0),
                 "strategy": order.metadata.get("strategy", ""),
                 "strike_source": order.metadata.get("strike_source", ""),
+                "edge": order.metadata.get("edge", 0),
             },
         )
         self._open_positions.append(pos)
