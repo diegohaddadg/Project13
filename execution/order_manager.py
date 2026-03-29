@@ -336,6 +336,16 @@ class OrderManager:
                 )
                 return f"Direction conflict: already have {opposite} in this market"
 
+        # latency_arb: one entry per market window. Repeated same-window entries
+        # have -21.4% ROI without outliers; single-entry windows have +19.9% ROI.
+        if signal.strategy == "latency_arb" and market_positions > 0:
+            log.warning(
+                f"[ORDER_MGR] REJECT {sig_tag} reason=latency_arb_single_entry_window "
+                f"market_id={signal.market_id} strategy=latency_arb "
+                f"existing_positions={market_positions}"
+            )
+            return "latency_arb: single entry per window"
+
         total_open = self._pm.count_open_positions() + (
             sum(1 for o in self._order_history
                 if o.status == "LIVE" and o.execution_mode == "live")
