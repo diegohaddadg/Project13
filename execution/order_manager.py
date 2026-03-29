@@ -571,6 +571,11 @@ class OrderManager:
         path = Path(config.TRADE_LOG_PATH)
         if not path.exists():
             log.info("No existing trade log found — starting fresh")
+            log.warning(
+                f"[PAPER] fresh_session_reset "
+                f"starting_equity={config.STARTING_CAPITAL_USDC} "
+                f"backup=check logs/backup_* for previous session"
+            )
             return
 
         raw_rows: list[dict] = []
