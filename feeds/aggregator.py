@@ -12,6 +12,7 @@ from models.market_state import MarketState
 from feeds.binance import BinanceFeed
 from feeds.coinbase import CoinbaseFeed
 from feeds.polymarket import PolymarketFeed
+from feeds.chainlink import ChainlinkFeed
 from utils.logger import get_logger
 import config
 
@@ -79,10 +80,12 @@ class Aggregator:
         if not test_mode:
             self._binance_feed = BinanceFeed(on_tick=self._on_binance_tick)
             self._coinbase_feed = CoinbaseFeed(on_tick=self._on_coinbase_tick)
-            self._polymarket_feed = PolymarketFeed()
+            self._chainlink_feed = ChainlinkFeed()
+            self._polymarket_feed = PolymarketFeed(chainlink_feed=self._chainlink_feed)
         else:
             self._binance_feed = None
             self._coinbase_feed = None
+            self._chainlink_feed = None
             self._polymarket_feed = None
 
     @property
@@ -138,6 +141,7 @@ class Aggregator:
         if self._test_mode:
             await self._heartbeat_loop()
         else:
+            await self._chainlink_feed.start()
             await asyncio.gather(
                 self._binance_feed.start(),
                 self._coinbase_feed.start(),

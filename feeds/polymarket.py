@@ -99,13 +99,15 @@ def _parse_json_field(value) -> list:
 class PolymarketFeed:
     """Polymarket BTC up/down market data ingestion."""
 
-    def __init__(self):
+    def __init__(self, chainlink_feed=None):
         self._running = False
         self._session: Optional[aiohttp.ClientSession] = None
         self._active_markets: dict[str, MarketState] = {}
         self._active_condition_ids: dict[str, str] = {}
         # Strike prices captured at market discovery (BTC spot at the time)
         self._captured_strikes: dict[str, float] = {}
+        # Chainlink on-chain feed for better strike approximation
+        self._chainlink_feed = chainlink_feed
         # Condition IDs whose strike has been confirmed from oracle priceToBeat
         self._oracle_strike_confirmed: set[str] = set()
         # Oracle strike source per condition_id (for strike_source field)
@@ -358,11 +360,23 @@ class PolymarketFeed:
                 self._active_condition_ids[market_type] = condition_id
                 self._window_discovered_at[condition_id] = time.time()
 
-                # Capture current BTC spot as strike for this new market
-                # (approximate — replaced by oracle priceToBeat once available)
-                if self._latest_spot_price > 0:
+                # Capture strike for this new market.
+                # Prefer Chainlink on-chain (~$5 error) over Coinbase spot (~$50 error).
+                cl_price = None
+                if self._chainlink_feed:
+                    cl_price = self._chainlink_feed.read_latest_price()
+                if cl_price and cl_price > 0:
+                    self._captured_strikes[condition_id] = cl_price
+                    log.info(
+                        f"  Strike captured: ${cl_price:,.2f} "
+                        f"(Chainlink on-chain, ~$5 median error)"
+                    )
+                elif self._latest_spot_price > 0:
                     self._captured_strikes[condition_id] = self._latest_spot_price
-                    log.info(f"  Strike captured: ${self._latest_spot_price:,.2f} (BTC spot at discovery, approximate)")
+                    log.info(
+                        f"  Strike captured: ${self._latest_spot_price:,.2f} "
+                        f"(Coinbase spot fallback, ~$50 error)"
+                    )
 
             # Try to upgrade strike to real oracle priceToBeat from events API
             slug = market_data.get("slug", "")
@@ -642,13 +656,20 @@ class PolymarketFeed:
                 strike_status = "confirmed"
                 strike_source = self._oracle_strike_source.get(condition_id, "oracle")
                 strike_confirmed_at = self._oracle_strike_confirmed_ts.get(condition_id, 0.0)
-            elif not config.REQUIRE_CONFIRMED_STRIKE:
+            # Determine the approximate source used
+            _has_chainlink = (
+                self._chainlink_feed is not None
+                and self._chainlink_feed.last_price > 0
+            )
+            _approx_source = "chainlink_onchain" if _has_chainlink else "spot_approx"
+
+            if not config.REQUIRE_CONFIRMED_STRIKE:
                 strike_status = "confirmed"
-                strike_source = "spot_approx"
+                strike_source = _approx_source
                 strike_confirmed_at = 0.0
             elif waiting_seconds <= config.STRIKE_CONFIRMATION_TIMEOUT_S:
                 strike_status = "waiting"
-                strike_source = "spot_approx"
+                strike_source = _approx_source
                 strike_confirmed_at = 0.0
             else:
                 # Timeout — evaluate approximate fallback
@@ -884,6 +905,22 @@ class PolymarketFeed:
                                         source = f"events_api_finalPrice_prev({prev_slug[-10:]})"
                 except Exception:
                     pass
+
+        # --- Source 3: Chainlink on-chain feed (better approximation, not confirmation) ---
+        if oracle_strike is None and self._chainlink_feed:
+            cl_price = self._chainlink_feed.read_latest_price()
+            if cl_price and cl_price > 0:
+                old = self._captured_strikes.get(condition_id, 0.0)
+                if old > 0 and abs(cl_price - old) > 1.0:
+                    self._captured_strikes[condition_id] = cl_price
+                    log.info(
+                        f"[STRIKE] chainlink_refresh market={market_type} "
+                        f"old=${old:,.2f} new=${cl_price:,.2f} "
+                        f"delta=${abs(cl_price - old):,.2f} "
+                        f"age={self._chainlink_feed.price_age_seconds:.0f}s"
+                    )
+            # Chainlink is NOT a confirmation — don't mark confirmed, just return
+            return
 
         if oracle_strike is None or oracle_strike <= 0:
             return

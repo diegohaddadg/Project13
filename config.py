@@ -327,6 +327,16 @@ STRIKE_APPROX_MAX_DISCOVERY_DELAY_S = float(_env("STRIKE_APPROX_MAX_DISCOVERY_DE
 STRIKE_APPROX_MAX_GAP_USD = float(_env("STRIKE_APPROX_MAX_GAP_USD", "70"))
 STRIKE_APPROX_EDGE_MULTIPLIER = float(_env("STRIKE_APPROX_EDGE_MULTIPLIER", "2.0"))
 
+# --- Chainlink On-Chain Strike Source ---
+# Read Chainlink BTC/USD price feed on Polygon as an early strike estimate.
+# Not identical to Data Streams (which Polymarket uses for resolution), but
+# validated to ~$3 median / ~$5 mean error vs priceToBeat across 22 windows.
+# Used as strike_source="chainlink_onchain" — better than Coinbase spot (~$50 error).
+STRIKE_CHAINLINK_ENABLED = _env("STRIKE_CHAINLINK_ENABLED", "true").lower() == "true"
+STRIKE_CHAINLINK_RPC_URL = _env("STRIKE_CHAINLINK_RPC_URL", "https://rpc-mainnet.matic.quiknode.pro")
+# Chainlink BTC/USD aggregator proxy on Polygon mainnet
+STRIKE_CHAINLINK_AGGREGATOR = "0xc907E116054Ad103354f2D350FD2514433D57F6f"
+
 # --- Replay / Tape ---
 REPLAY_TAPE_ENABLED = os.getenv("REPLAY_TAPE_ENABLED", "true").lower() == "true"
 REPLAY_TAPE_PATH = "data/live_tape.jsonl"
