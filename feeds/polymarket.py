@@ -653,32 +653,38 @@ class PolymarketFeed:
                 self._captured_strikes[condition_id] = strike_price
 
             is_oracle = condition_id in self._oracle_strike_confirmed
+            _has_chainlink = (
+                self._chainlink_feed is not None
+                and self._chainlink_feed.last_price > 0
+            )
 
             # --- Strike confirmation state ---
             discovered_at = self._window_discovered_at.get(condition_id, time.time())
             waiting_seconds = time.time() - discovered_at
 
             if is_oracle:
+                # Oracle confirmed (events API priceToBeat / prev finalPrice).
+                # Primarily reachable for 15-min windows (~320s into 900s window).
                 strike_status = "confirmed"
                 strike_source = self._oracle_strike_source.get(condition_id, "oracle")
                 strike_confirmed_at = self._oracle_strike_confirmed_ts.get(condition_id, 0.0)
-            # Determine the approximate source used
-            _has_chainlink = (
-                self._chainlink_feed is not None
-                and self._chainlink_feed.last_price > 0
-            )
-            _approx_source = "chainlink_onchain" if _has_chainlink else "spot_approx"
-
-            if not config.REQUIRE_CONFIRMED_STRIKE:
+            elif not config.REQUIRE_CONFIRMED_STRIKE:
                 strike_status = "confirmed"
-                strike_source = _approx_source
+                strike_source = "chainlink_onchain" if _has_chainlink else "spot_approx"
                 strike_confirmed_at = 0.0
             elif waiting_seconds <= config.STRIKE_CONFIRMATION_TIMEOUT_S:
                 strike_status = "waiting"
-                strike_source = _approx_source
+                strike_source = "chainlink_onchain" if _has_chainlink else "spot_approx"
+                strike_confirmed_at = 0.0
+            elif _has_chainlink:
+                # Timeout reached but Chainlink on-chain is active and refreshing.
+                # Use it directly — no need for approx_fallback evaluation.
+                # Chainlink refreshes every ~30s with ~$5 median error vs oracle.
+                strike_status = "confirmed"
+                strike_source = "chainlink_onchain"
                 strike_confirmed_at = 0.0
             else:
-                # Timeout — evaluate approximate fallback
+                # No Chainlink available — evaluate approximate fallback
                 strike_status, strike_source, strike_confirmed_at = self._evaluate_approx_fallback(
                     condition_id, market_type, slug, strike_price,
                     discovered_at, waiting_seconds,
@@ -688,42 +694,31 @@ class PolymarketFeed:
             spot_gap = abs(self._latest_spot_price - strike_price) if self._latest_spot_price > 0 and strike_price > 0 else 0.0
             if strike_status == "waiting":
                 log.info(
-                    f"[STRIKE] waiting_for_confirmed market={market_type} "
-                    f"window={slug[:48]} approx_strike=${strike_price:,.2f} "
+                    f"[STRIKE] waiting market={market_type} "
+                    f"window={slug[:48]} strike=${strike_price:,.2f} "
                     f"waited={waiting_seconds:.0f}s timeout={config.STRIKE_CONFIRMATION_TIMEOUT_S:.0f}s "
-                    f"source=prev_finalPrice"
+                    f"source={strike_source}"
                 )
             elif strike_status == "timeout":
                 log.warning(
                     f"[STRIKE] timeout skip_window market={market_type} "
                     f"window={slug[:48]} waited={waiting_seconds:.0f}s "
-                    f"approx_strike=${strike_price:,.2f} gap=${spot_gap:,.2f}"
+                    f"strike=${strike_price:,.2f} gap=${spot_gap:,.2f}"
                 )
             elif strike_status == "approx_fallback":
                 if condition_id not in self._approx_fallback_logged:
                     self._approx_fallback_logged.add(condition_id)
                     log.warning(
-                        f"[STRIKE] timeout_elapsed_using_current_source "
-                        f"market={market_type} strike_source={strike_source} "
+                        f"[STRIKE] approx_fallback market={market_type} "
+                        f"strike_source={strike_source} "
                         f"waited={waiting_seconds:.0f}s"
                     )
-                log.warning(
-                    f"[STRIKE] fallback_approved market={market_type} "
-                    f"window={slug[:48]} gap=${self._latest_price_source_gap:,.2f} "
-                    f"discovery_delay={waiting_seconds:.0f}s "
-                    f"edge_buffer_passed=true source=spot_approx_early"
-                )
             else:
                 log.info(
-                    f"[STRIKE] confirmed market={market_type} window={slug[:48]} "
-                    f"strike=${strike_price:,.2f} spot=${self._latest_spot_price:,.2f} "
-                    f"gap=${spot_gap:,.2f} source={strike_source}"
+                    f"[STRIKE] active market={market_type} window={slug[:48]} "
+                    f"strike=${strike_price:,.2f} source={strike_source} "
+                    f"gap=${spot_gap:,.2f}"
                 )
-
-            log.info(
-                f"[STRIKE] status market={market_type} "
-                f"strike_status={strike_status} strike_source={strike_source}"
-            )
 
             gamma_tr = self._compute_time_remaining(end_date_str)
             time_remaining, time_to_window, window_started, timing_source = (
