@@ -389,6 +389,10 @@ async def run():
     log.info(f"Starting Project13... (run_id={_RUN_ID})")
     log.info(f"Execution mode: {config.EXECUTION_MODE}")
     log.info(f"Trading enabled: {config.TRADING_ENABLED}")
+    log.warning(
+        f"[MODE] execution_mode={config.EXECUTION_MODE} "
+        f"live_trading_disabled={config.EXECUTION_MODE != 'live'}"
+    )
     log.info(f"Starting capital: ${config.STARTING_CAPITAL_USDC:.2f}")
     log.info(f"Max drawdown: {config.MAX_DRAWDOWN_PCT:.0%} (of HWM)")
     ex = config.DAILY_LOSS_LIMIT_PCT * config.STARTING_CAPITAL_USDC

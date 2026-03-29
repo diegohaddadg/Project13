@@ -166,8 +166,10 @@ SIZE_TIER_LOW = 0.05
 
 # --- Execution ---
 TRADING_ENABLED = _env("TRADING_ENABLED", "true").lower() == "true"
-EXECUTION_MODE = _env("EXECUTION_MODE", "paper")
-LIVE_TRADING_CONFIRMATION = _env("LIVE_TRADING_CONFIRMATION", "")
+# FORCED PAPER MODE — live trading paused. To re-enable live, remove the
+# override below and let _env("EXECUTION_MODE", "paper") read from .env.
+EXECUTION_MODE = "paper"  # was: _env("EXECUTION_MODE", "paper")
+LIVE_TRADING_CONFIRMATION = ""  # cleared — live requires I_UNDERSTAND
 # Dynamic order sizing — scales with current total equity
 MAX_ORDER_SIZE_PCT = 0.08              # max single order = 8% of current total equity
 MAX_ORDER_SIZE_FLOOR_USDC = 5.0        # minimum order size (prevents dust orders)
