@@ -324,6 +324,18 @@ class OrderManager:
             )
             return f"Max entries per window reached ({total_market_entries}/{config.MAX_ENTRIES_PER_WINDOW})"
 
+        # Direction conflict: reject if there's already an open position in the
+        # opposite direction for the same market. Contradictory bets (UP + DOWN
+        # in the same window) are always net-negative due to spread and fees.
+        opposite = "DOWN" if signal.direction == "UP" else "UP"
+        for p in self._pm.get_open_positions():
+            if p.market_id == signal.market_id and p.direction == opposite:
+                log.warning(
+                    f"[ORDER_MGR] REJECT {sig_tag} reason=direction_conflict "
+                    f"existing={opposite} market_id={signal.market_id}"
+                )
+                return f"Direction conflict: already have {opposite} in this market"
+
         total_open = self._pm.count_open_positions() + (
             sum(1 for o in self._order_history
                 if o.status == "LIVE" and o.execution_mode == "live")
