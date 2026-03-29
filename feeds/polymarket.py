@@ -221,6 +221,10 @@ class PolymarketFeed:
             headers={"User-Agent": "Project13/1.0 (Polymarket feed)"},
         )
         log.info("Polymarket feed starting...")
+        log.warning(
+            f"[STRIKE] approx_gap_threshold_active "
+            f"max_gap_usd={config.STRIKE_APPROX_MAX_GAP_USD}"
+        )
         try:
             while self._running:
                 try:
