@@ -116,6 +116,8 @@ class PolymarketFeed:
         self._oracle_strike_confirmed_ts: dict[str, float] = {}
         # Timestamp when each condition_id's window was first discovered (for timeout)
         self._window_discovered_at: dict[str, float] = {}
+        # Condition IDs that have already logged the timeout_elapsed message (one-shot)
+        self._approx_fallback_logged: set[str] = set()
 
         self.poll_count: int = 0
         self.transition_count: int = 0
@@ -226,6 +228,10 @@ class PolymarketFeed:
         log.warning(
             f"[STRIKE] approx_gap_threshold_active "
             f"max_gap_usd={config.STRIKE_APPROX_MAX_GAP_USD}"
+        )
+        log.warning(
+            f"[STRIKE] confirmation_timeout_active "
+            f"timeout_s={config.STRIKE_CONFIRMATION_TIMEOUT_S}"
         )
         try:
             while self._running:
@@ -694,6 +700,13 @@ class PolymarketFeed:
                     f"approx_strike=${strike_price:,.2f} gap=${spot_gap:,.2f}"
                 )
             elif strike_status == "approx_fallback":
+                if condition_id not in self._approx_fallback_logged:
+                    self._approx_fallback_logged.add(condition_id)
+                    log.warning(
+                        f"[STRIKE] timeout_elapsed_using_current_source "
+                        f"market={market_type} strike_source={strike_source} "
+                        f"waited={waiting_seconds:.0f}s"
+                    )
                 log.warning(
                     f"[STRIKE] fallback_approved market={market_type} "
                     f"window={slug[:48]} gap=${self._latest_price_source_gap:,.2f} "

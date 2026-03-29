@@ -317,7 +317,7 @@ if TESTING_MODE:
 # When True, markets with unconfirmed strikes are not signalable (no trading).
 # The oracle strike arrives via events API after the previous window resolves.
 REQUIRE_CONFIRMED_STRIKE = _env("REQUIRE_CONFIRMED_STRIKE", "true").lower() == "true"
-STRIKE_CONFIRMATION_TIMEOUT_S = float(_env("STRIKE_CONFIRMATION_TIMEOUT_S", "120"))
+STRIKE_CONFIRMATION_TIMEOUT_S = float(_env("STRIKE_CONFIRMATION_TIMEOUT_S", "15"))
 
 # --- Approximate Strike Fallback ---
 # When confirmed strike does not arrive in time, allow approximate strike
