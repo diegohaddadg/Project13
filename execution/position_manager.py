@@ -95,6 +95,7 @@ class PositionManager:
                 "execution_mode": order.execution_mode,
                 "strike": order.metadata.get("strike", 0),
                 "strategy": order.metadata.get("strategy", ""),
+                "strike_source": order.metadata.get("strike_source", ""),
             },
         )
         self._open_positions.append(pos)
@@ -129,6 +130,7 @@ class PositionManager:
                 "execution_mode": order.execution_mode,
                 "strike": order.metadata.get("strike", 0),
                 "strategy": order.metadata.get("strategy", ""),
+                "strike_source": order.metadata.get("strike_source", ""),
                 # Carry through condition_id and token_id for redemption after restart
                 "condition_id": order.metadata.get("condition_id", ""),
                 "token_id": order.token_id,

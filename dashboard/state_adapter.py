@@ -378,6 +378,7 @@ class StateAdapter:
         return {
             **s,
             "strategy_breakdown": breakdown,
+            "strike_source_breakdown": self._analytics.get_strike_source_breakdown(),
             "total_equity": self._pm.get_total_equity(),
             "available_capital": self._pm.get_available_capital(),
             "deployed_capital_usdc": deployed,

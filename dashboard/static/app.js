@@ -187,21 +187,28 @@ function renderMarket(el, m) {
 
   // Strike display with confirmation status
   const ss = m.strike_status || 'waiting';
-  let strikeFmt, strikeCls;
+  let strikeFmt, strikeCls, strikeLabel;
   if (ss === 'confirmed' && m.strike_price > 0) {
     strikeFmt = `$${m.strike_price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
     strikeCls = 'green';
+    strikeLabel = ' (confirmed)';
+  } else if (ss === 'approx_fallback' && m.strike_price > 0) {
+    strikeFmt = `~$${m.strike_price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+    strikeCls = 'yellow';
+    strikeLabel = ' (approx - gated)';
   } else if (ss === 'timeout') {
     strikeFmt = 'TIMEOUT';
     strikeCls = 'red';
+    strikeLabel = ' (skipped)';
   } else if (m.strike_price > 0) {
     strikeFmt = `~$${m.strike_price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
     strikeCls = 'yellow';
+    strikeLabel = ' (waiting...)';
   } else {
     strikeFmt = 'N/A';
     strikeCls = 'red';
+    strikeLabel = '';
   }
-  const strikeLabel = ss === 'confirmed' ? ' (confirmed)' : ss === 'timeout' ? ' (skipped)' : ' (waiting...)';
   const strikeHtml = `<span class="metric-value ${strikeCls}">${strikeFmt}${strikeLabel}</span>`;
 
   // Pre-window row only for plausible short waits (5m/15m); ignore bogus multi-hour values.

@@ -121,10 +121,98 @@ class PolymarketFeed:
 
         # External spot price injection for strike capture
         self._latest_spot_price: float = 0.0
+        # External USDT/USD basis gap injection for fallback evaluation
+        self._latest_price_source_gap: float = 0.0
+        # Strike analytics counters
+        self.strike_analytics = {
+            "confirmed_trades": 0,
+            "approx_trades": 0,
+            "timeout_skipped": 0,
+            "fallback_rejected_late_discovery": 0,
+            "fallback_rejected_high_gap": 0,
+            "fallback_rejected_weak_edge": 0,
+        }
 
     def set_spot_price(self, price: float) -> None:
         """Update the latest BTC spot price (called by aggregator)."""
         self._latest_spot_price = price
+
+    def set_price_source_gap(self, gap: float) -> None:
+        """Update the latest USDT/USD basis gap (called by aggregator)."""
+        self._latest_price_source_gap = gap
+
+    def _evaluate_approx_fallback(
+        self,
+        condition_id: str,
+        market_type: str,
+        slug: str,
+        strike_price: float,
+        discovered_at: float,
+        waiting_seconds: float,
+    ) -> tuple[str, str, float]:
+        """Evaluate whether approximate strike is good enough for gated trading.
+
+        Returns (strike_status, strike_source, strike_confirmed_at).
+
+        Conditions — ALL must pass:
+        A. Early discovery: market discovered within STRIKE_APPROX_MAX_DISCOVERY_DELAY_S of window open
+        B. Small basis gap: USDT/USD gap <= STRIKE_APPROX_MAX_GAP_USD
+        C. (Strong edge buffer is checked later in signal_engine)
+        """
+        if not config.STRIKE_ALLOW_APPROX_FALLBACK:
+            self.strike_analytics["timeout_skipped"] += 1
+            return ("timeout", "spot_approx", 0.0)
+
+        # --- Condition A: early discovery ---
+        # Discovery delay = time between slug timestamp (window start) and discovery
+        window_start_ts = self._slug_to_timestamp(slug)
+        if window_start_ts > 0:
+            discovery_delay = discovered_at - window_start_ts
+        else:
+            discovery_delay = waiting_seconds  # fallback: use waiting time
+
+        gap = self._latest_price_source_gap
+
+        log.info(
+            f"[STRIKE] fallback_eval market={market_type} "
+            f"discovery_delay={discovery_delay:.1f}s gap=${gap:,.2f} "
+            f"window={slug[:48]}"
+        )
+
+        if discovery_delay > config.STRIKE_APPROX_MAX_DISCOVERY_DELAY_S:
+            self.strike_analytics["fallback_rejected_late_discovery"] += 1
+            log.warning(
+                f"[STRIKE] fallback_rejected market={market_type} "
+                f"reason=late_discovery discovery_delay={discovery_delay:.1f}s "
+                f"max={config.STRIKE_APPROX_MAX_DISCOVERY_DELAY_S}s"
+            )
+            self.strike_analytics["timeout_skipped"] += 1
+            return ("timeout", "spot_approx", 0.0)
+
+        # --- Condition B: small basis gap ---
+        if gap > config.STRIKE_APPROX_MAX_GAP_USD:
+            self.strike_analytics["fallback_rejected_high_gap"] += 1
+            log.warning(
+                f"[STRIKE] fallback_rejected market={market_type} "
+                f"reason=high_gap gap=${gap:,.2f} "
+                f"max=${config.STRIKE_APPROX_MAX_GAP_USD:,.2f}"
+            )
+            self.strike_analytics["timeout_skipped"] += 1
+            return ("timeout", "spot_approx", 0.0)
+
+        # Conditions A+B passed — allow signaling with edge buffer (condition C in signal_engine)
+        return ("approx_fallback", "spot_approx_early", 0.0)
+
+    @staticmethod
+    def _slug_to_timestamp(slug: str) -> float:
+        """Extract the Unix timestamp from a btc-updown slug. Returns 0 on failure."""
+        match = re.match(r"^btc-updown-\d+m-(\d+)$", slug)
+        if match:
+            try:
+                return float(match.group(1))
+            except (ValueError, TypeError):
+                pass
+        return 0.0
 
     async def start(self) -> None:
         self._running = True
@@ -543,30 +631,35 @@ class PolymarketFeed:
             is_oracle = condition_id in self._oracle_strike_confirmed
 
             # --- Strike confirmation state ---
+            discovered_at = self._window_discovered_at.get(condition_id, time.time())
+            waiting_seconds = time.time() - discovered_at
+
             if is_oracle:
                 strike_status = "confirmed"
                 strike_source = self._oracle_strike_source.get(condition_id, "oracle")
                 strike_confirmed_at = self._oracle_strike_confirmed_ts.get(condition_id, 0.0)
+            elif not config.REQUIRE_CONFIRMED_STRIKE:
+                strike_status = "confirmed"
+                strike_source = "spot_approx"
+                strike_confirmed_at = 0.0
+            elif waiting_seconds <= config.STRIKE_CONFIRMATION_TIMEOUT_S:
+                strike_status = "waiting"
+                strike_source = "spot_approx"
+                strike_confirmed_at = 0.0
             else:
-                discovered_at = self._window_discovered_at.get(condition_id, time.time())
-                waiting_seconds = time.time() - discovered_at
-                if config.REQUIRE_CONFIRMED_STRIKE and waiting_seconds > config.STRIKE_CONFIRMATION_TIMEOUT_S:
-                    strike_status = "timeout"
-                    strike_source = "spot_approx"
-                    strike_confirmed_at = 0.0
-                else:
-                    strike_status = "waiting"
-                    strike_source = "spot_approx"
-                    strike_confirmed_at = 0.0
+                # Timeout — evaluate approximate fallback
+                strike_status, strike_source, strike_confirmed_at = self._evaluate_approx_fallback(
+                    condition_id, market_type, slug, strike_price,
+                    discovered_at, waiting_seconds,
+                )
 
             # Log strike state
             spot_gap = abs(self._latest_spot_price - strike_price) if self._latest_spot_price > 0 and strike_price > 0 else 0.0
             if strike_status == "waiting":
-                waiting_s = time.time() - self._window_discovered_at.get(condition_id, time.time())
                 log.info(
                     f"[STRIKE] waiting_for_confirmed market={market_type} "
                     f"window={slug[:48]} approx_strike=${strike_price:,.2f} "
-                    f"waited={waiting_s:.0f}s timeout={config.STRIKE_CONFIRMATION_TIMEOUT_S:.0f}s "
+                    f"waited={waiting_seconds:.0f}s timeout={config.STRIKE_CONFIRMATION_TIMEOUT_S:.0f}s "
                     f"source=prev_finalPrice"
                 )
             elif strike_status == "timeout":
@@ -575,12 +668,24 @@ class PolymarketFeed:
                     f"window={slug[:48]} waited={waiting_seconds:.0f}s "
                     f"approx_strike=${strike_price:,.2f} gap=${spot_gap:,.2f}"
                 )
+            elif strike_status == "approx_fallback":
+                log.warning(
+                    f"[STRIKE] fallback_approved market={market_type} "
+                    f"window={slug[:48]} gap=${self._latest_price_source_gap:,.2f} "
+                    f"discovery_delay={waiting_seconds:.0f}s "
+                    f"edge_buffer_passed=true source=spot_approx_early"
+                )
             else:
                 log.info(
                     f"[STRIKE] confirmed market={market_type} window={slug[:48]} "
                     f"strike=${strike_price:,.2f} spot=${self._latest_spot_price:,.2f} "
                     f"gap=${spot_gap:,.2f} source={strike_source}"
                 )
+
+            log.info(
+                f"[STRIKE] status market={market_type} "
+                f"strike_status={strike_status} strike_source={strike_source}"
+            )
 
             gamma_tr = self._compute_time_remaining(end_date_str)
             time_remaining, time_to_window, window_started, timing_source = (
@@ -618,11 +723,8 @@ class PolymarketFeed:
             # endregion
 
             # Signalable: market is active, has valid prices and time left in tradable window
-            # When REQUIRE_CONFIRMED_STRIKE is enabled, unconfirmed strikes block signaling
-            strike_ok = (
-                strike_status == "confirmed"
-                or not config.REQUIRE_CONFIRMED_STRIKE
-            )
+            # When REQUIRE_CONFIRMED_STRIKE is enabled, only confirmed or approved fallback trades
+            strike_ok = strike_status in ("confirmed", "approx_fallback")
             is_signalable = (
                 strike_price > 0
                 and yes_price > 0

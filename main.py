@@ -125,6 +125,8 @@ def _mkt_section(state, label, spot, vol, sig):
     ss = getattr(state, "strike_status", "waiting")
     if ss == "confirmed":
         sk = f"{G}${state.strike_price:,.2f} (confirmed){RST}"
+    elif ss == "approx_fallback":
+        sk = f"{Y}~${state.strike_price:,.2f} (approx - gated){RST}"
     elif ss == "timeout":
         sk = f"{R}TIMEOUT (skipped){RST}"
     elif state.strike_price > 0:

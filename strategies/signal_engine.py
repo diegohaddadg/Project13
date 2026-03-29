@@ -52,6 +52,8 @@ class SignalEngine:
         self.last_competition: dict[str, dict] = {}
         # Momentum snapshot for diagnostics
         self._last_momentum: dict = {}
+        # Strike fallback edge rejections (for analytics)
+        self.approx_edge_rejections: int = 0
 
     @property
     def signal_history(self) -> list[TradeSignal]:
@@ -129,6 +131,9 @@ class SignalEngine:
             s for s in all_signals
             if s.is_actionable() and not s.metadata.get("data_only")
         ]
+
+        # Apply approximate-strike edge buffer gate (condition C)
+        actionable = self._apply_approx_strike_gate(actionable, signal_input)
         # Log data-only candidates to history for visibility
         for s in all_signals:
             if s.metadata.get("data_only") and s.is_actionable():
@@ -177,6 +182,10 @@ class SignalEngine:
             market_age_ms=(time.time() - state.timestamp) * 1000 if state.timestamp else 0,
         )
 
+        # Tag all signals from this market with strike source
+        _strike_source = state.strike_source
+        _strike_status = state.strike_status
+
         if "latency_arb" in config.ENABLED_STRATEGIES:
             sig = latency_arb.evaluate(**kwargs)
             if sig and config.LATENCY_ARB_V2_ENABLED:
@@ -199,6 +208,10 @@ class SignalEngine:
             sig = market_maker.evaluate(**mm_kw)
             if sig:
                 signals.append(sig)
+
+        for sig in signals:
+            sig.metadata["strike_source"] = _strike_source
+            sig.metadata["strike_status"] = _strike_status
 
         return signals
 
@@ -293,6 +306,61 @@ class SignalEngine:
                 f.write(_json.dumps(rec_with_ts, default=str) + "\n")
         except Exception:
             pass
+
+    def _apply_approx_strike_gate(
+        self, signals: list[TradeSignal], signal_input: dict
+    ) -> list[TradeSignal]:
+        """Filter signals from approx_fallback markets unless edge is strong enough.
+
+        When a market's strike_status is "approx_fallback", signals must meet
+        a higher edge and net_ev threshold (STRIKE_APPROX_EDGE_MULTIPLIER times
+        the normal minimum) to compensate for strike uncertainty.
+        """
+        if not config.STRIKE_ALLOW_APPROX_FALLBACK:
+            return signals
+
+        multiplier = config.STRIKE_APPROX_EDGE_MULTIPLIER
+        min_edge = config.MIN_ACTIONABLE_EDGE * multiplier
+        min_ev = config.MIN_NET_EV * multiplier
+
+        # Identify which market types are in approx_fallback
+        approx_markets: set[str] = set()
+        for key in ("market_state_5m", "market_state_15m"):
+            state: MarketState | None = signal_input.get(key)
+            if state and state.strike_status == "approx_fallback":
+                approx_markets.add(state.market_type)
+
+        if not approx_markets:
+            return signals
+
+        filtered = []
+        for sig in signals:
+            if sig.market_type not in approx_markets:
+                filtered.append(sig)
+                continue
+
+            edge_ok = sig.edge >= min_edge
+            ev_ok = sig.net_ev >= min_ev
+            if edge_ok or ev_ok:
+                sig.metadata["strike_approx_gated"] = True
+                sig.metadata["strike_source"] = "spot_approx_early"
+                filtered.append(sig)
+                log.info(
+                    f"[STRIKE] approx_edge_gate_passed market={sig.market_type} "
+                    f"edge={sig.edge:.4f}>={min_edge:.4f} "
+                    f"net_ev={sig.net_ev:.4f}>={min_ev:.4f} "
+                    f"strategy={sig.strategy}"
+                )
+            else:
+                self.approx_edge_rejections += 1
+                log.warning(
+                    f"[STRIKE] fallback_rejected market={sig.market_type} "
+                    f"reason=weak_edge edge={sig.edge:.4f}<{min_edge:.4f} "
+                    f"net_ev={sig.net_ev:.4f}<{min_ev:.4f} "
+                    f"strategy={sig.strategy}"
+                )
+
+        return filtered
 
     def _apply_cooldown(self, signals: list[TradeSignal]) -> list[TradeSignal]:
         """Suppress signals that were recently emitted."""

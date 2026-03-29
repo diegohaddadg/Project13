@@ -417,6 +417,8 @@ class OrderManager:
                 "market_probability": signal.market_probability,
                 "condition_id": snapshot.condition_id,
                 "strike": snapshot.strike_price,
+                "strike_source": signal.metadata.get("strike_source", ""),
+                "strike_status": signal.metadata.get("strike_status", ""),
                 # Lag proxy fields
                 "decision_ts": time.time(),
                 "market_snapshot_ts": snapshot.timestamp,

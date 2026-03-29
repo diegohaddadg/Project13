@@ -317,6 +317,14 @@ if TESTING_MODE:
 REQUIRE_CONFIRMED_STRIKE = _env("REQUIRE_CONFIRMED_STRIKE", "true").lower() == "true"
 STRIKE_CONFIRMATION_TIMEOUT_S = float(_env("STRIKE_CONFIRMATION_TIMEOUT_S", "120"))
 
+# --- Approximate Strike Fallback ---
+# When confirmed strike does not arrive in time, allow approximate strike
+# under strict conditions: early discovery, small basis gap, strong edge.
+STRIKE_ALLOW_APPROX_FALLBACK = _env("STRIKE_ALLOW_APPROX_FALLBACK", "true").lower() == "true"
+STRIKE_APPROX_MAX_DISCOVERY_DELAY_S = float(_env("STRIKE_APPROX_MAX_DISCOVERY_DELAY_S", "30"))
+STRIKE_APPROX_MAX_GAP_USD = float(_env("STRIKE_APPROX_MAX_GAP_USD", "20"))
+STRIKE_APPROX_EDGE_MULTIPLIER = float(_env("STRIKE_APPROX_EDGE_MULTIPLIER", "2.0"))
+
 # --- Replay / Tape ---
 REPLAY_TAPE_ENABLED = os.getenv("REPLAY_TAPE_ENABLED", "true").lower() == "true"
 REPLAY_TAPE_PATH = "data/live_tape.jsonl"

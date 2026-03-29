@@ -52,6 +52,27 @@ class PerformanceAnalytics:
             return 0.0
         return max(0.0, (self._high_water_mark - current_capital) / self._high_water_mark)
 
+    def get_strike_source_breakdown(self) -> dict:
+        """Break down trades by strike source (confirmed vs approximate)."""
+        confirmed = [p for p in self._closed_positions if p.pnl is not None
+                     and p.metadata.get("strike_source") not in ("spot_approx_early",)]
+        approx = [p for p in self._closed_positions if p.pnl is not None
+                   and p.metadata.get("strike_source") == "spot_approx_early"]
+
+        def _stats(positions):
+            pnls = [p.pnl for p in positions if p.pnl is not None]
+            wins = [x for x in pnls if x > 0]
+            return {
+                "count": len(pnls),
+                "win_rate": len(wins) / len(pnls) if pnls else 0.0,
+                "total_pnl": sum(pnls),
+            }
+
+        return {
+            "confirmed": _stats(confirmed),
+            "approx_fallback": _stats(approx),
+        }
+
     def get_summary(self) -> dict:
         """Full performance summary."""
         pnls = [p.pnl for p in self._closed_positions if p.pnl is not None]

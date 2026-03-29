@@ -58,8 +58,8 @@ class MarketState:
     timing_source: str = ""       # set in feeds/polymarket: slug_period | gamma_end_date | none
 
     # Strike confirmation state
-    strike_status: str = "waiting"       # "waiting" | "confirmed" | "timeout"
-    strike_source: str = "spot_approx"   # "spot_approx" | "prev_finalPrice" | "oracle"
+    strike_status: str = "waiting"       # "waiting" | "confirmed" | "timeout" | "approx_fallback"
+    strike_source: str = "spot_approx"   # "spot_approx" | "spot_approx_early" | "prev_finalPrice" | "oracle"
     strike_confirmed_at: float = 0.0     # timestamp when strike was confirmed (0 = not confirmed)
 
     def implied_up_probability(self) -> float:

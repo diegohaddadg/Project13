@@ -95,6 +95,7 @@ class Aggregator:
         # fall back to Binance BTC/USDT if Coinbase is down
         if self._polymarket_feed and (self.latest_coinbase_tick is None or self.latest_coinbase_tick.is_stale):
             self._polymarket_feed.set_spot_price(tick.price)
+        self._sync_price_source_gap()
         if self.warming_up:
             return
         self._price_window_binance.append(tick.price)
@@ -106,6 +107,7 @@ class Aggregator:
         # Coinbase BTC/USD is preferred for strike capture (USD pair, closer to Chainlink)
         if self._polymarket_feed:
             self._polymarket_feed.set_spot_price(tick.price)
+        self._sync_price_source_gap()
         if self.warming_up:
             return
         self.coinbase_tick_count += 1
@@ -215,6 +217,13 @@ class Aggregator:
         if b and not b.is_stale:
             return b.price
         return None
+
+    def _sync_price_source_gap(self) -> None:
+        """Push latest USDT/USD basis gap to polymarket feed for fallback evaluation."""
+        if self._polymarket_feed:
+            gap = self.get_price_source_gap()
+            if gap is not None:
+                self._polymarket_feed.set_price_source_gap(gap)
 
     def get_price_source_gap(self) -> Optional[float]:
         """Return absolute USD gap between Binance USDT and Coinbase USD.
