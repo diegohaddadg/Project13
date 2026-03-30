@@ -252,6 +252,48 @@ class LiveReconciler:
     # Phase 2: Redemption
     # ------------------------------------------------------------------
 
+    def _enqueue_redeem_candidate(self, pos: Position, summary: dict) -> None:
+        """Enqueue a position into the durable redeem queue for the external worker.
+
+        Used when config.LIVE_REDEEM_ENQUEUE_ONLY is True.
+        Does NOT submit any on-chain transaction.
+        """
+        from execution.redeem_queue import RedeemQueue, RedeemQueueItem
+
+        condition_id = pos.metadata.get("condition_id", "")
+        token_id = pos.metadata.get("token_id", "")
+
+        item = RedeemQueueItem(
+            position_id=pos.position_id,
+            order_id=pos.order_id,
+            market_id=pos.market_id,
+            condition_id=condition_id,
+            token_id=token_id,
+            direction=pos.direction,
+            market_type=pos.market_type,
+            entry_price=pos.entry_price,
+            num_shares=pos.num_shares,
+            source="bot",
+        )
+
+        queue = RedeemQueue("data/redeem_queue.jsonl")
+        ok, msg = queue.enqueue(item)
+
+        if ok:
+            summary["redemptions_this_cycle"] = summary.get("redemptions_this_cycle", 0)
+            log.warning(
+                f"[REDEEM] enqueued_for_worker pos={pos.position_id} "
+                f"{pos.direction} {pos.market_type} "
+                f"{pos.num_shares:.1f}sh @{pos.entry_price:.3f} "
+                f"condition={condition_id[:16]}... "
+                f"queue_id={item.queue_id}"
+            )
+        else:
+            log.info(
+                f"[REDEEM] enqueue_skipped pos={pos.position_id} "
+                f"reason={msg}"
+            )
+
     def _check_and_redeem(self, summary: dict) -> None:
         """Check for resolved markets and handle winning/losing positions."""
         all_open = self._pm.get_open_positions()
@@ -307,11 +349,14 @@ class LiveReconciler:
                         f"retry={retry_count}/{config.LIVE_REDEEM_MAX_RETRIES}"
                     )
                 else:
-                    log.info(
-                        f"[REDEEM] claimable_retry_eligible pos={pos.position_id} "
-                        f"retry={retry_count + 1}/{config.LIVE_REDEEM_MAX_RETRIES}"
-                    )
-                    self._attempt_redemption(pos, condition_id, summary)
+                    if config.LIVE_REDEEM_ENQUEUE_ONLY:
+                        self._enqueue_redeem_candidate(pos, summary)
+                    else:
+                        log.info(
+                            f"[REDEEM] claimable_retry_eligible pos={pos.position_id} "
+                            f"retry={retry_count + 1}/{config.LIVE_REDEEM_MAX_RETRIES}"
+                        )
+                        self._attempt_redemption(pos, condition_id, summary)
                 continue
 
             if not condition_id:
@@ -403,7 +448,10 @@ class LiveReconciler:
                     f"{pos.num_shares:.1f}sh @{pos.entry_price:.3f} "
                     f"condition={condition_id[:16]}..."
                 )
-                self._attempt_redemption(pos, condition_id, summary)
+                if config.LIVE_REDEEM_ENQUEUE_ONLY:
+                    self._enqueue_redeem_candidate(pos, summary)
+                else:
+                    self._attempt_redemption(pos, condition_id, summary)
             else:
                 log.warning(
                     f"[REDEEM] eligibility_passed outcome=LOSS "

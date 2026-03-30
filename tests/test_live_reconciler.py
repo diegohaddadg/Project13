@@ -530,5 +530,211 @@ class TestSafeFloat(unittest.TestCase):
         self.assertEqual(_safe_float(50), 50.0)
 
 
+class TestEnqueueOnlyMode(unittest.TestCase):
+    """Test Phase 2a: bot enqueues redeem candidates instead of inline tx."""
+
+    def setUp(self):
+        """Create a temp queue file for each test."""
+        import tempfile, os
+        self._tmpdir = tempfile.mkdtemp()
+        self._queue_path = os.path.join(self._tmpdir, "queue.jsonl")
+        from execution.redeem_queue import RedeemQueue
+        self._real_queue = RedeemQueue(self._queue_path)
+
+    def tearDown(self):
+        import os
+        if os.path.exists(self._queue_path):
+            os.unlink(self._queue_path)
+        os.rmdir(self._tmpdir)
+
+    def _make_recon_with_queue(self, client, pm, om):
+        """Create a LiveReconciler whose enqueue helper uses the temp queue."""
+        recon = LiveReconciler(client, pm, om)
+        real_queue = self._real_queue
+
+        original_enqueue = recon._enqueue_redeem_candidate.__func__
+
+        def patched_enqueue(self_recon, pos, summary):
+            from execution.redeem_queue import RedeemQueueItem
+            condition_id = pos.metadata.get("condition_id", "")
+            token_id = pos.metadata.get("token_id", "")
+            item = RedeemQueueItem(
+                position_id=pos.position_id,
+                order_id=pos.order_id,
+                market_id=pos.market_id,
+                condition_id=condition_id,
+                token_id=token_id,
+                direction=pos.direction,
+                market_type=pos.market_type,
+                entry_price=pos.entry_price,
+                num_shares=pos.num_shares,
+                source="bot",
+            )
+            ok, msg = real_queue.enqueue(item)
+            # Mirror the logging behavior without importing log
+            summary["redemptions_this_cycle"] = summary.get("redemptions_this_cycle", 0)
+
+        import types
+        recon._enqueue_redeem_candidate = types.MethodType(patched_enqueue, recon)
+        return recon
+
+    @patch.object(config, "EXECUTION_MODE", "live")
+    @patch.object(config, "LIVE_RECONCILIATION_ENABLED", True)
+    @patch.object(config, "LIVE_AUTO_REDEEM_ENABLED", True)
+    @patch.object(config, "LIVE_REDEEM_ENQUEUE_ONLY", True)
+    def test_win_enqueued_not_redeemed_inline(self):
+        """When enqueue_only, winning position is enqueued, not redeemed inline."""
+        pm = PositionManager()
+        om = _MockOrderManager()
+        client = MagicMock()
+
+        order = _make_live_order(status="FILLED", fill_price=0.55)
+        om._order_history.append(order)
+        pos = pm.open_position(order)
+        pos.metadata["condition_id"] = "0x" + "ab" * 32
+        pos.metadata["token_id"] = "tok_winner"
+        pos.metadata["execution_mode"] = "live"
+
+        client.get_market.return_value = {
+            "closed": True,
+            "resolved": True,
+            "tokens": [
+                {"token_id": "tok_winner", "winner": 1.0},
+                {"token_id": "tok_loser", "winner": 0.0},
+            ],
+        }
+
+        recon = self._make_recon_with_queue(client, pm, om)
+        summary = recon.reconcile()
+
+        # Position should still be open — bot does NOT close it in enqueue-only mode
+        self.assertEqual(pm.count_open_positions(), 1)
+        # No inline redemption
+        self.assertEqual(summary.get("redemptions_this_cycle", 0), 0)
+        # Queue should have one item
+        items = self._real_queue.load_all()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].position_id, pos.position_id)
+        self.assertEqual(items[0].token_id, "tok_winner")
+        self.assertEqual(items[0].source, "bot")
+
+    @patch.object(config, "EXECUTION_MODE", "live")
+    @patch.object(config, "LIVE_RECONCILIATION_ENABLED", True)
+    @patch.object(config, "LIVE_AUTO_REDEEM_ENABLED", True)
+    @patch.object(config, "LIVE_REDEEM_ENQUEUE_ONLY", True)
+    def test_duplicate_not_enqueued_twice(self):
+        """Second reconciliation cycle does not enqueue the same position again."""
+        pm = PositionManager()
+        om = _MockOrderManager()
+        client = MagicMock()
+
+        order = _make_live_order(status="FILLED", fill_price=0.55)
+        om._order_history.append(order)
+        pos = pm.open_position(order)
+        pos.metadata["condition_id"] = "0x" + "ab" * 32
+        pos.metadata["token_id"] = "tok_winner"
+        pos.metadata["execution_mode"] = "live"
+
+        client.get_market.return_value = {
+            "closed": True,
+            "resolved": True,
+            "tokens": [
+                {"token_id": "tok_winner", "winner": 1.0},
+                {"token_id": "tok_loser", "winner": 0.0},
+            ],
+        }
+
+        recon = self._make_recon_with_queue(client, pm, om)
+        recon.reconcile()
+        recon.reconcile()  # Second cycle
+
+        items = self._real_queue.load_all()
+        self.assertEqual(len(items), 1)  # Still just one
+
+    @patch.object(config, "EXECUTION_MODE", "live")
+    @patch.object(config, "LIVE_RECONCILIATION_ENABLED", True)
+    @patch.object(config, "LIVE_AUTO_REDEEM_ENABLED", True)
+    @patch.object(config, "LIVE_REDEEM_ENQUEUE_ONLY", True)
+    def test_loss_still_closed_locally(self):
+        """Loss-path is unchanged — positions are still closed locally."""
+        pm = PositionManager()
+        om = _MockOrderManager()
+        client = MagicMock()
+
+        order = _make_live_order(status="FILLED", fill_price=0.55)
+        om._order_history.append(order)
+        pos = pm.open_position(order)
+        pos.metadata["condition_id"] = "0x" + "cd" * 32
+        pos.metadata["token_id"] = "tok_loser"
+        pos.metadata["execution_mode"] = "live"
+
+        client.get_market.return_value = {
+            "closed": True,
+            "resolved": True,
+            "tokens": [
+                {"token_id": "tok_winner", "winner": 1.0},
+                {"token_id": "tok_loser", "winner": 0.0},
+            ],
+        }
+
+        recon = self._make_recon_with_queue(client, pm, om)
+        recon.reconcile()
+
+        # Loss still closed locally (no change from old behavior)
+        self.assertEqual(pm.count_open_positions(), 0)
+        closed = pm.get_closed_positions()
+        self.assertEqual(len(closed), 1)
+        self.assertLess(closed[0].pnl, 0)
+
+        # Nothing enqueued for losses
+        items = self._real_queue.load_all()
+        self.assertEqual(len(items), 0)
+
+    @patch.object(config, "EXECUTION_MODE", "live")
+    @patch.object(config, "LIVE_RECONCILIATION_ENABLED", True)
+    @patch.object(config, "LIVE_AUTO_REDEEM_ENABLED", True)
+    @patch.object(config, "LIVE_REDEEM_ENQUEUE_ONLY", False)
+    def test_enqueue_off_uses_inline_redeem(self):
+        """When LIVE_REDEEM_ENQUEUE_ONLY=False, old inline path is used."""
+        pm = PositionManager()
+        om = _MockOrderManager()
+        client = MagicMock()
+
+        order = _make_live_order(status="FILLED", fill_price=0.55)
+        om._order_history.append(order)
+        pos = pm.open_position(order)
+        pos.metadata["condition_id"] = "0xcond456"
+        pos.metadata["token_id"] = "tok_winner"
+        pos.metadata["execution_mode"] = "live"
+
+        client.get_market.return_value = {
+            "closed": True,
+            "resolved": True,
+            "tokens": [
+                {"token_id": "tok_winner", "winner": 1.0},
+                {"token_id": "tok_loser", "winner": 0.0},
+            ],
+        }
+
+        recon = LiveReconciler(client, pm, om)
+        # Mock redeemer for inline path
+        mock_redeemer = MagicMock()
+        mock_redeemer.is_ready = True
+        mock_redeemer.redeem.return_value = {
+            "success": True, "tx_hash": "0xtx", "error": None, "gas_used": 150000,
+        }
+        recon._onchain_redeemer = mock_redeemer
+        recon._onchain_redeemer_init_attempted = True
+
+        summary = recon.reconcile()
+
+        # Inline path works as before
+        self.assertEqual(summary["redemptions_this_cycle"], 1)
+        self.assertEqual(pm.count_open_positions(), 0)
+        # Nothing enqueued
+        items = self._real_queue.load_all()
+        self.assertEqual(len(items), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

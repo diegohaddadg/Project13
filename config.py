@@ -201,6 +201,13 @@ LIVE_RECONCILE_INTERVAL_SECONDS = float(os.getenv("LIVE_RECONCILE_INTERVAL_SECON
 LIVE_REDEEM_RETRY_BACKOFF_SECONDS = 30.0
 LIVE_REDEEM_MAX_RETRIES = 5
 
+# Phase 2a: When True, the bot enqueues redeem candidates to
+# data/redeem_queue.jsonl instead of submitting on-chain tx inline.
+# The separate redeem worker (scripts/run_redeem_worker.py) processes
+# the queue.  Requires LIVE_AUTO_REDEEM_ENABLED=True to reach the
+# redeem scan at all.  Set to False to revert to inline redeem.
+LIVE_REDEEM_ENQUEUE_ONLY = os.getenv("LIVE_REDEEM_ENQUEUE_ONLY", "false").lower() == "true"
+
 # --- Paper-Like Risk Mode (Strategy B) ---
 # When enabled, risk/sizing/exposure calculations use a synthetic baseline
 # instead of actual restored equity. This makes a small live account behave
