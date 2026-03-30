@@ -277,6 +277,8 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
                     "phase_would_pass": sig.metadata.get("phase_would_pass"),
                     "market_age_ms_signal": sig.metadata.get("market_age_ms"),
                     "disagreement": sig.metadata.get("disagreement"),
+                    "strike_source": sig.metadata.get("strike_source", ""),
+                    "strike_status": sig.metadata.get("strike_status", ""),
                     "risk_decision": risk_result["decision"],
                     "risk_reason": risk_result["reason"],
                 }
@@ -297,6 +299,8 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
                         trace["execution_path"] = order.metadata.get("execution_path", "unknown")
                         trace["fee_mode"] = order.metadata.get("fee_mode", "unknown")
                         trace["market_age_ms"] = order.metadata.get("market_age_ms")
+                        trace["order_strike_source"] = order.metadata.get("strike_source", "")
+                        trace["order_strike_status"] = order.metadata.get("strike_status", "")
                 else:
                     trace["order_status"] = "not_submitted"
 

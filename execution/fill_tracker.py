@@ -260,6 +260,8 @@ class FillTracker:
                 "hold_seconds": pos.hold_duration_seconds(),
                 "status": pos.status,
                 "source": "real_market",
+                "strike_source": pos.metadata.get("strike_source", ""),
+                "strategy": pos.metadata.get("strategy", ""),
             }
             path = Path("logs/execution_consistency_audit.txt")
             path.parent.mkdir(parents=True, exist_ok=True)
