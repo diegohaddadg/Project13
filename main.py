@@ -433,6 +433,11 @@ async def run():
     else:
         log.info(f"Session HWM reset to ${risk_equity:.2f} (matches restored equity)")
 
+    # Apply any terminal redeem results from the external worker
+    if config.LIVE_REDEEM_ENQUEUE_ONLY:
+        from execution.redeem_startup import apply_startup_results
+        apply_startup_results(pm, om, rm)
+
     log.info(f"Signal engine — strategies: {engine.get_active_strategies()}")
 
     # Tape recorder for replay
