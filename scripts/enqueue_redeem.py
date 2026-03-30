@@ -40,7 +40,7 @@ def main():
     parser.add_argument("--queue", default="data/redeem_queue.jsonl")
     parser.add_argument("--from-trade-log", action="store_true",
                         help="Extract fields from the trade log by order-id")
-    parser.add_argument("--trade-log", default="data/trade_log.jsonl",
+    parser.add_argument("--trade-log", default=None,
                         help="Path to trade log (used with --from-trade-log)")
     args = parser.parse_args()
 
@@ -50,7 +50,10 @@ def main():
         if not args.order_id:
             print("[ERROR] --order-id is required when using --from-trade-log")
             sys.exit(1)
-        item = _item_from_trade_log(args.trade_log, args.order_id)
+        log_path = _resolve_trade_log(args.trade_log)
+        if log_path is None:
+            sys.exit(1)
+        item = _item_from_trade_log(log_path, args.order_id)
         if item is None:
             sys.exit(1)
     else:
@@ -89,6 +92,37 @@ def main():
     else:
         print(f"[REJECTED] {msg}")
         sys.exit(1)
+
+
+_DEFAULT_TRADE_LOG_SEARCH = [
+    "logs/trade_log.jsonl",
+    "data/trade_log.jsonl",
+]
+
+
+def _resolve_trade_log(explicit_path: str | None) -> str | None:
+    """Resolve the trade log path.  Returns path or None (with error printed)."""
+    from pathlib import Path
+
+    if explicit_path is not None:
+        p = Path(explicit_path)
+        if p.exists():
+            print(f"[INFO] Using trade log: {p}")
+            return str(p)
+        print(f"[ERROR] Trade log not found: {explicit_path}")
+        return None
+
+    for candidate in _DEFAULT_TRADE_LOG_SEARCH:
+        p = Path(candidate)
+        if p.exists():
+            print(f"[INFO] Using trade log: {p}")
+            return str(p)
+
+    print("[ERROR] Trade log not found. Checked:")
+    for candidate in _DEFAULT_TRADE_LOG_SEARCH:
+        print(f"         - {candidate}")
+    print("       Use --trade-log <path> to specify explicitly.")
+    return None
 
 
 def _item_from_trade_log(log_path: str, order_id: str):
