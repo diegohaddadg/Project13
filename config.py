@@ -95,13 +95,6 @@ LATENCY_ARB_LATE_REQUIRE_FRESH_5S = True
 LATENCY_ARB_MIN_PRICE_MOVE = 15.0     # USD — minimum |spot - strike| to trade
 LATENCY_ARB_15MIN_ENABLED = False     # False = data-only, no execution for 15min
 
-# --- Latency Arb Re-Entry Control ---
-# Allow a 2nd latency_arb entry in the same window only if the setup
-# has materially improved (better price AND better edge).
-LAT_ARB_MAX_ENTRIES_PER_WINDOW = 2
-LAT_ARB_REENTRY_PRICE_IMPROVEMENT_PCT = 0.20   # new price must be 20% better
-LAT_ARB_REENTRY_EDGE_IMPROVEMENT_PCT = 0.25    # new edge must exceed first by 25%
-
 # --- Latency Arb V2 (refinement layer) ---
 LATENCY_ARB_V2_ENABLED = os.getenv("LATENCY_ARB_V2_ENABLED", "false").lower() == "true"
 
