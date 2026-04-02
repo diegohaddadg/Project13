@@ -39,7 +39,7 @@ def _make_signal():
 
 
 def _portfolio(capital=100.0):
-    return {"current_capital": capital, "volatility": 0.02, "feed_healthy": True}
+    return {"current_capital": capital, "true_equity": capital, "volatility": 0.02, "feed_healthy": True}
 
 
 def _make_rm(starting_equity=100.0):
@@ -47,6 +47,7 @@ def _make_rm(starting_equity=100.0):
     ks = KillSwitch()
     exp = ExposureTracker(pm)
     analytics = PerformanceAnalytics()
+    analytics.set_position_manager(pm)
     agg = Aggregator(test_mode=True)
     hm = _AlwaysHealthyMonitor(agg)
     rm = RiskManager(pm, ks, exp, analytics, hm)
@@ -55,64 +56,82 @@ def _make_rm(starting_equity=100.0):
     return rm, pm, ks, analytics
 
 
-class TestDrawdownCooldown(unittest.TestCase):
-    """Test that max drawdown triggers a cooldown, not a permanent kill switch."""
+class TestDrawdownLatch(unittest.TestCase):
+    """Test that max drawdown latches trading off for the session."""
 
     @patch.object(config, "PAPER_RISK_WARN_ONLY", False)
     @patch.object(config, "MAX_DRAWDOWN_PCT", 0.20)
-    @patch.object(config, "DRAWDOWN_COOLDOWN_SECONDS", 300.0)
-    def test_drawdown_breach_starts_cooldown(self):
+    def test_drawdown_breach_latches_session(self):
         rm, pm, ks, analytics = _make_rm(100.0)
 
         # Capital dropped to 75 → 25% drawdown from HWM of 100
         result = rm.evaluate_signal(_make_signal(), _portfolio(75.0))
 
         self.assertEqual(result["decision"], "REJECT")
-        self.assertIn("cooldown", result["reason"].lower())
+        self.assertIn("latch", result["reason"].lower())
+        self.assertTrue(rm._drawdown_latched)
         # Kill switch should NOT be triggered
         self.assertFalse(ks.is_active())
 
     @patch.object(config, "PAPER_RISK_WARN_ONLY", False)
     @patch.object(config, "MAX_DRAWDOWN_PCT", 0.20)
-    @patch.object(config, "DRAWDOWN_COOLDOWN_SECONDS", 0.01)  # very short
-    def test_resume_after_cooldown_if_recovered(self):
+    def test_latch_persists_even_after_recovery(self):
+        """Once latched, trading stays blocked even if equity recovers."""
         rm, pm, ks, analytics = _make_rm(100.0)
 
-        # Breach drawdown
+        # Breach drawdown → latch
         rm.evaluate_signal(_make_signal(), _portfolio(75.0))
-        self.assertEqual(rm._drawdown_cooldown_until, rm._drawdown_cooldown_until)
-
-        # Wait for cooldown to expire
-        time.sleep(0.02)
+        self.assertTrue(rm._drawdown_latched)
 
         # Capital recovered to 95 → 5% drawdown, below 20% limit
         result = rm.evaluate_signal(_make_signal(), _portfolio(95.0))
 
-        # Should approve (drawdown recovered and cooldown expired)
-        self.assertEqual(result["decision"], "APPROVE")
-        self.assertFalse(ks.is_active())
+        # Should STILL reject — latch is permanent for the session
+        self.assertEqual(result["decision"], "REJECT")
+        self.assertIn("latch", result["reason"].lower())
+        self.assertTrue(rm._drawdown_latched)
 
     @patch.object(config, "PAPER_RISK_WARN_ONLY", False)
     @patch.object(config, "MAX_DRAWDOWN_PCT", 0.20)
-    @patch.object(config, "DRAWDOWN_COOLDOWN_SECONDS", 0.01)
-    def test_still_in_drawdown_after_cooldown_restarts_cooldown(self):
+    def test_latch_persists_after_time_passes(self):
+        """Latch does NOT expire with time — it's permanent for the session."""
         rm, pm, ks, analytics = _make_rm(100.0)
 
-        # Breach drawdown
+        # Breach drawdown → latch
         rm.evaluate_signal(_make_signal(), _portfolio(75.0))
-        time.sleep(0.02)
 
-        # Cooldown expired but still at 25% drawdown
+        # Simulate time passing (even hours)
+        time.sleep(0.01)
+
+        # Still at drawdown — must still be blocked
         result = rm.evaluate_signal(_make_signal(), _portfolio(75.0))
-
         self.assertEqual(result["decision"], "REJECT")
-        self.assertIn("cooldown", result["reason"].lower())
-        # Should have restarted cooldown
-        self.assertGreater(rm._drawdown_cooldown_until, time.time() - 1)
+        self.assertTrue(rm._drawdown_latched)
+
+        # Recovered — must STILL be blocked
+        result = rm.evaluate_signal(_make_signal(), _portfolio(99.0))
+        self.assertEqual(result["decision"], "REJECT")
+        self.assertTrue(rm._drawdown_latched)
 
     @patch.object(config, "PAPER_RISK_WARN_ONLY", False)
     @patch.object(config, "MAX_DRAWDOWN_PCT", 0.20)
-    @patch.object(config, "DRAWDOWN_COOLDOWN_SECONDS", 300.0)
+    def test_fresh_session_clears_latch(self):
+        """New RiskManager instance (= fresh session) starts unlatched."""
+        rm, pm, ks, analytics = _make_rm(100.0)
+
+        # Breach drawdown → latch
+        rm.evaluate_signal(_make_signal(), _portfolio(75.0))
+        self.assertTrue(rm._drawdown_latched)
+
+        # Simulate fresh session (new RiskManager)
+        rm2, pm2, ks2, analytics2 = _make_rm(80.0)
+        self.assertFalse(rm2._drawdown_latched)
+
+        result = rm2.evaluate_signal(_make_signal(), _portfolio(80.0))
+        self.assertEqual(result["decision"], "APPROVE")
+
+    @patch.object(config, "PAPER_RISK_WARN_ONLY", False)
+    @patch.object(config, "MAX_DRAWDOWN_PCT", 0.20)
     def test_kill_switch_not_triggered_by_drawdown(self):
         rm, pm, ks, analytics = _make_rm(100.0)
 
@@ -121,22 +140,6 @@ class TestDrawdownCooldown(unittest.TestCase):
 
         # Kill switch must remain inactive
         self.assertFalse(ks.is_active())
-
-    @patch.object(config, "PAPER_RISK_WARN_ONLY", False)
-    @patch.object(config, "MAX_DRAWDOWN_PCT", 0.20)
-    @patch.object(config, "DRAWDOWN_COOLDOWN_SECONDS", 300.0)
-    def test_recovery_during_cooldown_still_waits(self):
-        """Even if drawdown recovers, must wait for cooldown to expire."""
-        rm, pm, ks, analytics = _make_rm(100.0)
-
-        # Breach drawdown → starts cooldown
-        rm.evaluate_signal(_make_signal(), _portfolio(75.0))
-
-        # Capital recovered but cooldown still active
-        result = rm.evaluate_signal(_make_signal(), _portfolio(95.0))
-
-        self.assertEqual(result["decision"], "REJECT")
-        self.assertIn("cooldown", result["reason"].lower())
 
 
 class TestHWMReset(unittest.TestCase):
@@ -219,15 +222,14 @@ class TestRiskStatusReport(unittest.TestCase):
 
     @patch.object(config, "PAPER_RISK_WARN_ONLY", False)
     @patch.object(config, "MAX_DRAWDOWN_PCT", 0.20)
-    @patch.object(config, "DRAWDOWN_COOLDOWN_SECONDS", 300.0)
-    def test_status_shows_drawdown_cooldown(self):
+    def test_status_shows_drawdown_latch(self):
         rm, pm, ks, analytics = _make_rm(100.0)
         rm.evaluate_signal(_make_signal(), _portfolio(75.0))
 
         status = rm.get_risk_status()
 
-        self.assertGreater(status["drawdown_cooldown_remaining_s"], 0)
-        self.assertTrue(any("cooldown" in b.lower() for b in status["trading_blockers"]))
+        self.assertTrue(status["drawdown_latched"])
+        self.assertTrue(any("latch" in b.lower() for b in status["trading_blockers"]))
         self.assertFalse(status["trading_allowed"])
 
 
