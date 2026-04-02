@@ -366,7 +366,8 @@ class TestSignalEngine(unittest.TestCase):
         engine = SignalEngine()
         strategies = engine.get_active_strategies()
         self.assertIn("latency_arb", strategies)
-        self.assertIn("sniper", strategies)
+        # sniper currently disabled in config; test reflects deployed state
+        self.assertNotIn("sniper", strategies)
 
     def test_signal_history_bounded(self):
         engine = SignalEngine()

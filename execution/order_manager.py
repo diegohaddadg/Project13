@@ -43,6 +43,10 @@ class OrderManager:
         # Dedup tracking: (market_id, direction, strategy) -> last_execute_time
         self._dedup: dict[tuple[str, str, str], float] = {}
 
+        # V2a direction cooldown: tracks last executed latency_arb direction + timestamp
+        self._lat_arb_last_direction: str = ""
+        self._lat_arb_last_direction_ts: float = 0.0
+
         # Last sizing computation detail (for dashboard observability)
         self._last_sizing_detail: dict = {}
 
@@ -346,6 +350,12 @@ class OrderManager:
             )
             return "latency_arb: single entry per window"
 
+        # --- V2a live gates (latency_arb only, behind feature flag) ---
+        if signal.strategy == "latency_arb" and config.LAT_ARB_V2A_ENABLED:
+            v2a_reject = self._check_lat_arb_v2a(signal, sig_tag)
+            if v2a_reject:
+                return v2a_reject
+
         total_open = self._pm.count_open_positions() + (
             sum(1 for o in self._order_history
                 if o.status == "LIVE" and o.execution_mode == "live")
@@ -387,6 +397,53 @@ class OrderManager:
             return "Duplicate signal suppressed (execution dedup)"
 
         return None  # All checks passed
+
+    # --- V2a live gates ---
+
+    def _check_lat_arb_v2a(
+        self, signal: TradeSignal, sig_tag: str
+    ) -> Optional[str]:
+        """V2a stricter filters for latency_arb. Returns rejection reason or None."""
+        # Rule B: max disagreement cap
+        disagreement = abs(signal.model_probability - signal.market_probability)
+        if disagreement > config.LAT_ARB_V2A_MAX_DISAGREEMENT:
+            log.warning(
+                f"[ORDER_MGR] REJECT {sig_tag} "
+                f"reason=lat_arb_v2a_max_disagreement "
+                f"disagreement={disagreement:.3f} "
+                f"max={config.LAT_ARB_V2A_MAX_DISAGREEMENT} "
+                f"model_prob={signal.model_probability:.3f} "
+                f"market_prob={signal.market_probability:.3f}"
+            )
+            return (
+                f"V2a: disagreement {disagreement:.3f} exceeds "
+                f"max {config.LAT_ARB_V2A_MAX_DISAGREEMENT}"
+            )
+
+        # Rule C: opposite-direction cooldown
+        if (
+            self._lat_arb_last_direction
+            and self._lat_arb_last_direction != signal.direction
+        ):
+            elapsed = time.time() - self._lat_arb_last_direction_ts
+            if elapsed < config.LAT_ARB_V2A_DIRECTION_COOLDOWN_S:
+                remaining = config.LAT_ARB_V2A_DIRECTION_COOLDOWN_S - elapsed
+                log.warning(
+                    f"[ORDER_MGR] REJECT {sig_tag} "
+                    f"reason=lat_arb_v2a_direction_cooldown "
+                    f"last_direction={self._lat_arb_last_direction} "
+                    f"new_direction={signal.direction} "
+                    f"elapsed={elapsed:.0f}s "
+                    f"cooldown={config.LAT_ARB_V2A_DIRECTION_COOLDOWN_S}s "
+                    f"remaining={remaining:.0f}s"
+                )
+                return (
+                    f"V2a: direction cooldown — last trade was "
+                    f"{self._lat_arb_last_direction} {elapsed:.0f}s ago, "
+                    f"need {config.LAT_ARB_V2A_DIRECTION_COOLDOWN_S}s"
+                )
+
+        return None
 
     # --- Order construction ---
 
@@ -523,6 +580,10 @@ class OrderManager:
         # Prune old entries
         cutoff = time.time() - config.EXECUTION_DEDUP_SECONDS * 10
         self._dedup = {k: v for k, v in self._dedup.items() if v > cutoff}
+        # V2a: track last latency_arb direction for cooldown
+        if signal.strategy == "latency_arb":
+            self._lat_arb_last_direction = signal.direction
+            self._lat_arb_last_direction_ts = time.time()
 
     def _log_lifecycle(self, order, position) -> None:
         """Log fill-to-position lifecycle event."""

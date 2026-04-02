@@ -95,6 +95,13 @@ LATENCY_ARB_LATE_REQUIRE_FRESH_5S = True
 LATENCY_ARB_MIN_PRICE_MOVE = 15.0     # USD — minimum |spot - strike| to trade
 LATENCY_ARB_15MIN_ENABLED = False     # False = data-only, no execution for 15min
 
+# --- Latency Arb V2a Live Gates ---
+# Stricter filters based on live postmortem: confident-but-wrong trades and
+# rapid direction flipping were the top failure modes.
+LAT_ARB_V2A_ENABLED = _env("LAT_ARB_V2A_ENABLED", "false").lower() == "true"
+LAT_ARB_V2A_MAX_DISAGREEMENT = 0.30      # reject if |model_prob - market_prob| exceeds this
+LAT_ARB_V2A_DIRECTION_COOLDOWN_S = 120   # seconds before allowing opposite-direction trade
+
 # --- Latency Arb V2 (refinement layer) ---
 LATENCY_ARB_V2_ENABLED = os.getenv("LATENCY_ARB_V2_ENABLED", "false").lower() == "true"
 
