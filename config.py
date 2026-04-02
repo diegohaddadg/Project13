@@ -69,7 +69,7 @@ NEAR_RESOLUTION_THRESHOLD = 20.0
 
 
 # --- Signal Engine ---
-ENABLED_STRATEGIES = ["latency_arb", "sniper"]
+ENABLED_STRATEGIES = ["latency_arb"]  # sniper disabled — live postmortem showed -$10 on 1 trade, model mispriced $0.01 token at 91%
 MIN_ACTIONABLE_EDGE = 0.05
 SIGNAL_COOLDOWN_SECONDS = 15   # suppress repeated identical signals
 
