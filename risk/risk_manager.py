@@ -92,11 +92,13 @@ class RiskManager:
                 reason: str
         """
         current_capital = portfolio_state.get("current_capital", 0)
+        true_equity = portfolio_state.get("true_equity", current_capital)
         volatility = portfolio_state.get("volatility")
         daily_loss_cap_usd = self.daily_loss_limit_usd()
 
-        # Update analytics HWM
-        self._analytics.update_hwm(current_capital)
+        # Update analytics HWM from TRUE equity (not risk_equity which
+        # can be inflated by PAPER_LIKE_RISK_MODE baseline).
+        self._analytics.update_hwm(true_equity)
 
         # A. Kill switch
         if self._ks.is_active():
@@ -105,7 +107,7 @@ class RiskManager:
         # Run kill switch trigger checks — only for sustained critical failures
         # Do NOT kill-switch on transient latency spikes
         health = self._health.run_health_check()
-        drawdown = self._analytics.get_current_drawdown(current_capital)
+        drawdown = self._analytics.get_current_drawdown(true_equity)
         pw = self._paper_warn_only()
 
         self._ks.check_triggers(
@@ -299,6 +301,16 @@ class RiskManager:
         free_capital = self._pm.get_available_capital()
         drawdown = self._analytics.get_current_drawdown(equity)
         cooldown_remaining = max(0, self._cooldown_until - time.time())
+
+        # Temporary verification diagnostics — remove when accounting confirmed stable
+        realized = self._pm.get_total_pnl()
+        pm_closed = len(self._pm.get_closed_positions())
+        log.info(
+            f"[PNL_DEBUG] baseline={self._session_start_equity:.2f} "
+            f"true_equity={equity:.2f} realized_pnl={realized:.2f} "
+            f"daily_pnl={self._daily_pnl:.2f} hwm={self._analytics._high_water_mark:.2f} "
+            f"drawdown_pct={drawdown:.4f} pm_closed_count={pm_closed}"
+        )
 
         daily_limit_usd = self.daily_loss_limit_usd()
         daily_loss_pct = float(config.DAILY_LOSS_LIMIT_PCT)

@@ -112,18 +112,25 @@ class TestExposureTracker(unittest.TestCase):
 
 class TestPerformanceAnalytics(unittest.TestCase):
 
-    def test_empty_summary(self):
+    def _make_pa(self, closed_positions=None):
+        """Create a PerformanceAnalytics backed by a mock PositionManager."""
+        from unittest.mock import MagicMock
+        pm = MagicMock()
+        pm.get_closed_positions.return_value = closed_positions or []
         pa = PerformanceAnalytics()
+        pa.set_position_manager(pm)
+        return pa
+
+    def test_empty_summary(self):
+        pa = self._make_pa([])
         s = pa.get_summary()
         self.assertEqual(s["total_trades"], 0)
         self.assertEqual(s["win_rate"], 0.0)
 
     def test_update_and_summary(self):
-        pa = PerformanceAnalytics()
         p1 = Position(pnl=5.0, entry_timestamp=time.time() - 60)
         p2 = Position(pnl=-3.0, entry_timestamp=time.time() - 30)
-        pa.update(p1)
-        pa.update(p2)
+        pa = self._make_pa([p1, p2])
         s = pa.get_summary()
         self.assertEqual(s["total_trades"], 2)
         self.assertEqual(s["wins"], 1)
@@ -138,9 +145,9 @@ class TestPerformanceAnalytics(unittest.TestCase):
         self.assertAlmostEqual(dd, 15.0 / 110.0, places=3)
 
     def test_profit_factor(self):
-        pa = PerformanceAnalytics()
-        pa.update(Position(pnl=10.0, entry_timestamp=time.time()))
-        pa.update(Position(pnl=-5.0, entry_timestamp=time.time()))
+        p1 = Position(pnl=10.0, entry_timestamp=time.time())
+        p2 = Position(pnl=-5.0, entry_timestamp=time.time())
+        pa = self._make_pa([p1, p2])
         s = pa.get_summary()
         self.assertAlmostEqual(s["profit_factor"], 2.0)
 
@@ -148,16 +155,16 @@ class TestPerformanceAnalytics(unittest.TestCase):
         """Wins-only book must not emit inf (breaks browser JSON.parse on WebSocket)."""
         import json
 
-        pa = PerformanceAnalytics()
-        pa.update(Position(pnl=10.0, entry_timestamp=time.time()))
-        pa.update(Position(pnl=5.0, entry_timestamp=time.time()))
+        p1 = Position(pnl=10.0, entry_timestamp=time.time())
+        p2 = Position(pnl=5.0, entry_timestamp=time.time())
+        pa = self._make_pa([p1, p2])
         s = pa.get_summary()
         self.assertEqual(s["profit_factor"], 1e6)
         json.dumps(s, allow_nan=False)
 
     def test_generate_report(self):
-        pa = PerformanceAnalytics()
-        pa.update(Position(pnl=5.0, entry_timestamp=time.time()))
+        p = Position(pnl=5.0, entry_timestamp=time.time())
+        pa = self._make_pa([p])
         report = pa.generate_report(105.0)
         self.assertIn("PERFORMANCE REPORT", report)
         self.assertIn("Win Rate", report)
@@ -185,6 +192,7 @@ class TestRiskManager(unittest.TestCase):
         ks = KillSwitch()
         exp = ExposureTracker(pm)
         analytics = PerformanceAnalytics()
+        analytics.set_position_manager(pm)
         agg = Aggregator(test_mode=True)
         hm = _TestHealthMonitor(agg)  # Always-healthy monitor for unit tests
         rm = RiskManager(pm, ks, exp, analytics, hm)
@@ -345,10 +353,13 @@ class TestRiskManager(unittest.TestCase):
         self.assertAlmostEqual(cap_after, expected)
 
     def test_record_trade_result_counts_one_performance_trade_per_resolution(self):
-        """One closed position via record_trade_result → one Performance row (matches main resolution loop)."""
+        """One closed position in PM → one Performance row via analytics."""
         rm, pm, ks = self._make_rm()
         pa = rm._analytics
-        pos = Position(pnl=-2.5, entry_timestamp=time.time())
+        pos = Position(pnl=-2.5, entry_timestamp=time.time(), status="RESOLVED")
+        # In production, pm.close_position() adds to _closed_positions.
+        # Simulate that here since we're testing analytics reads from PM.
+        pm._closed_positions.append(pos)
         rm.record_trade_result(pos)
         s = pa.get_summary()
         self.assertEqual(s["total_trades"], 1, "each resolution must add exactly one trade")

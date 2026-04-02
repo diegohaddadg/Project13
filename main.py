@@ -247,6 +247,7 @@ async def terminal_dashboard(agg, engine, om, pm, ft, rm, analytics, hm, state_a
             for sig in signals:
                 portfolio_state = {
                     "current_capital": pm.get_risk_equity(),
+                    "true_equity": pm.get_total_equity(),
                     "volatility": vol,
                     "feed_healthy": si.get("feed_healthy", False),
                 }
@@ -416,12 +417,15 @@ async def run():
     ks = KillSwitch()
     exp = ExposureTracker(pm)
     analytics = PerformanceAnalytics()
+    analytics.set_position_manager(pm)
     hm = HealthMonitor(agg)
     rm = RiskManager(pm, ks, exp, analytics, hm)
     actual_equity = pm.get_total_equity()
     risk_equity = pm.get_risk_equity()
     rm.set_session_start_equity(risk_equity)
-    analytics.reset_hwm(risk_equity)
+    # HWM must be based on TRUE equity, not risk_equity (which can be
+    # inflated by PAPER_LIKE_RISK_MODE baseline).
+    analytics.reset_hwm(actual_equity)
 
     if config.PAPER_LIKE_RISK_MODE:
         log.warning(

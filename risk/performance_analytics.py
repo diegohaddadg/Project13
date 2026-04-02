@@ -16,29 +16,50 @@ log = get_logger("analytics")
 
 
 class PerformanceAnalytics:
-    """Tracks realized trading performance and generates reports."""
+    """Tracks realized trading performance and generates reports.
 
-    def __init__(self):
+    Uses PositionManager._closed_positions as the single source of truth
+    for all realized-trade metrics (PnL, win rate, profit factor, etc.).
+    Does NOT maintain its own independent closed-position list.
+    """
+
+    def __init__(self, position_manager=None):
         self._session_start: float = time.time()
-        self._closed_positions: list[Position] = []
+        self._pm = position_manager  # set after construction if needed
         self._high_water_mark: float = config.STARTING_CAPITAL_USDC
         self._max_drawdown_observed: float = 0.0
 
-    def reset_hwm(self, equity: float) -> None:
-        """Reset high-water mark to current equity at session start.
+    def set_position_manager(self, pm) -> None:
+        """Late-bind the PositionManager (for existing construction order)."""
+        self._pm = pm
 
-        Called after trade log restore so the HWM reflects actual starting
-        equity, not stale STARTING_CAPITAL that may be unreachable.
-        """
+    @property
+    def _closed_positions(self) -> list:
+        """Single source of truth: delegate to PositionManager."""
+        if self._pm is not None:
+            return self._pm.get_closed_positions()
+        return []
+
+    def reset_hwm(self, equity: float) -> None:
+        """Reset high-water mark to current TRUE equity at session start."""
         self._high_water_mark = equity
         self._max_drawdown_observed = 0.0
 
     def update(self, closed_position: Position) -> None:
-        """Record a newly closed position."""
-        self._closed_positions.append(closed_position)
+        """No-op: closed positions are tracked by PositionManager.
+
+        Kept for API compatibility — callers (RiskManager.record_trade_result)
+        still call this, but the position is already in pm._closed_positions
+        via pm.close_position().
+        """
+        pass
 
     def update_hwm(self, current_capital: float) -> None:
-        """Update high-water mark and drawdown tracking."""
+        """Update high-water mark and drawdown tracking.
+
+        current_capital MUST be true equity (pm.get_total_equity()),
+        NOT risk_equity (which can be inflated by PAPER_LIKE_RISK_MODE).
+        """
         if current_capital > self._high_water_mark:
             self._high_water_mark = current_capital
         if self._high_water_mark > 0:
@@ -47,7 +68,10 @@ class PerformanceAnalytics:
                 self._max_drawdown_observed = dd
 
     def get_current_drawdown(self, current_capital: float) -> float:
-        """Current drawdown from high-water mark as a fraction."""
+        """Current drawdown from high-water mark as a fraction.
+
+        current_capital MUST be true equity.
+        """
         if self._high_water_mark <= 0:
             return 0.0
         return max(0.0, (self._high_water_mark - current_capital) / self._high_water_mark)
